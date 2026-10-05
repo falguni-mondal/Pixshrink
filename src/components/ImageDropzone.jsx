@@ -1,33 +1,68 @@
 "use client";
 
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { makeThumbnail } from "@/lib/thumbnail";
-import { isImageFile } from "@/lib/fileTypes";
+import { isHeicFile } from "@/lib/fileTypes";
+import { prefersReducedMotion } from "@/lib/device";
 import { PixelMosaic } from "@/components/PixelLoader";
 
-const prefersReducedMotion = () =>
-  typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
-
-const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
-
+// Tiles animate in with a pure CSS animation (`backwards` fill), so a tile is always
+// visible as its normal state. If JS is busy or an animation is interrupted, nothing
+// can get stuck at opacity 0.
 const DZ_CSS = `
 .dz-scroll{scrollbar-width:thin;scrollbar-color:#111 transparent;overscroll-behavior:contain}
 .dz-scroll::-webkit-scrollbar{width:12px; border-left: 3px solid #111;}
 .dz-scroll::-webkit-scrollbar-track{background:transparent}
 .dz-scroll::-webkit-scrollbar-thumb{background:#111; border: 2px solid #fff;}
 .dz-scroll::-webkit-scrollbar-thumb:hover{background:var(--accent);}
+@keyframes dz-in{from{opacity:0;transform:translateY(12px) scale(.94)}to{opacity:1;transform:none}}
+.dz-in{animation:dz-in .45s cubic-bezier(.22,1,.36,1) backwards;animation-delay:var(--d,0ms)}
+@media (prefers-reduced-motion:reduce){.dz-in{animation:none}}
 `;
 
-const SUPPORTED = ["JPG", "PNG", "WEBP", "HEIC"];
-const MAX_MOBILE_FILES = 50;
+const SUPPORTED = ["JPG", "PNG", "WEBP", "AVIF", "HEIC"];
+const TOAST_MS = 6000;
+const PREPARE_DELAY_MS = 300; // wait this long after the picker closes before showing the loader
+const PREPARE_TIMEOUT_MS = 45000; // safety net if neither `change` nor `cancel` ever fires
 
-const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
+// Explicit allow-list. Anything else (SVG, animated GIF, PDFs, folders...) is rejected
+// with a message instead of failing later or vanishing silently.
+const ALLOWED_TYPES = new Set(["image/jpeg", "image/png", "image/webp", "image/avif"]);
+const ALLOWED_EXT = /\.(jpe?g|png|webp|avif|heic|heif)$/i;
+
+const isSupportedFile = (file) =>
+  isHeicFile(file) ||
+  ALLOWED_TYPES.has(file.type) ||
+  // Some browsers report an empty MIME type, so fall back to the extension.
+  (!file.type && ALLOWED_EXT.test(file.name));
+
+function splitFiles(list) {
+  const accepted = [];
+  const rejected = [];
+  for (const file of Array.from(list)) {
+    (isSupportedFile(file) ? accepted : rejected).push(file);
+  }
+  return { accepted, rejected };
+}
+
+function rejectionMessage(rejected) {
+  const names = rejected.slice(0, 2).map((f) => f.name || "unnamed");
+  const more = rejected.length > 2 ? ` and ${rejected.length - 2} more` : "";
+  const noun = rejected.length === 1 ? "file" : "files";
+  return `${rejected.length} ${noun} skipped (${names.join(", ")}${more}). Only JPG, PNG, WEBP, AVIF and HEIC are supported.`;
+}
+
+const ImagePreview = memo(function ImagePreview({ fileObj, onRemove, index = 0 }) {
   const [url, setUrl] = useState("");
   const [failed, setFailed] = useState(false);
   const holderRef = useRef(null);
   const removingRef = useRef(false);
 
+  // Builds the thumbnail only once the tile scrolls into view, and cleans up everything
+  // (pending work, observer, object URL, tweens) in one place.
+  // Keyed on the id, not the file: the parent may swap `file` for an in-memory copy later
+  // (phones, HEIC), and that must not restart the thumbnail.
   useEffect(() => {
     const el = holderRef.current;
     if (!el) return;
@@ -35,6 +70,7 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
     const controller = new AbortController();
     let objectUrl = "";
     let started = false;
+    let observer = null;
 
     const start = () => {
       if (started) return;
@@ -49,11 +85,10 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
           }
         })
         .catch((error) => {
-          if (error?.name !== "AbortError") setFailed(true);
+          if (error?.name !== "AbortError" && !controller.signal.aborted) setFailed(true);
         });
     };
 
-    let observer = null;
     if (typeof IntersectionObserver === "undefined") {
       start();
     } else {
@@ -70,15 +105,10 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
       controller.abort();
       observer?.disconnect();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
+      gsap.killTweensOf(el);
     };
-  }, [fileObj.file]);
-
-  useEffect(() => {
-    const el = holderRef.current;
-    return () => {
-      if (el) gsap.killTweensOf(el);
-    };
-  }, []);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fileObj.id]);
 
   const handleRemove = (e) => {
     e.stopPropagation();
@@ -99,7 +129,12 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
   };
 
   return (
-    <div ref={holderRef} data-tile className="group/tile relative aspect-square rounded-none border-[3px] border-neutral-900 bg-white transform-gpu shadow-[4px_4px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 hover:shadow-[6px_6px_0_rgba(17,17,17,1)]">
+    <div
+      ref={holderRef}
+      data-tile
+      style={{ "--d": `${Math.min(index, 24) * 30}ms` }}
+      className="dz-in group/tile relative aspect-square rounded-none border-[3px] border-neutral-900 bg-white transform-gpu shadow-[4px_4px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 hover:shadow-[6px_6px_0_rgba(17,17,17,1)]"
+    >
       {url ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
@@ -142,39 +177,76 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
   );
 });
 
-const toImages = (list) => Array.from(list).filter(isImageFile);
-
-function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
+function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }) {
   const fileInputRef = useRef(null);
-  const [limitError, setLimitError] = useState(false);
+  const toastTimerRef = useRef(null);
+  const [toast, setToast] = useState({ title: "", message: "" });
 
-  const handleFiles = (newFiles) => {
-    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
-    
-    // Safety Net: Guard against catastrophic memory overflow on smartphones
-    if (isMobile && files.length + newFiles.length > MAX_MOBILE_FILES) {
-      const allowed = Math.max(0, MAX_MOBILE_FILES - files.length);
-      if (allowed > 0) {
-        onFilesAdded(newFiles.slice(0, allowed));
-      }
-      setLimitError(true);
-      setTimeout(() => setLimitError(false), 6000);
-      return;
-    }
-    onFilesAdded(newFiles);
+  // "Preparing" = the picker has closed but the OS hasn't handed us the files yet.
+  const [preparing, setPreparing] = useState(false);
+  const pickerOpenRef = useRef(false);
+  const prepTimerRef = useRef(null);
+
+  const stopPreparing = () => {
+    pickerOpenRef.current = false;
+    clearTimeout(prepTimerRef.current);
+    setPreparing(false);
+  };
+
+  useEffect(() => () => clearTimeout(toastTimerRef.current), []);
+
+  // After the picker closes, the OS may still be preparing files (iCloud/Photos exports,
+  // HEIC handling) before the `change` event fires. Show a loader for that gap.
+  useEffect(() => {
+    const onBack = () => {
+      if (!pickerOpenRef.current || document.visibilityState === "hidden") return;
+      clearTimeout(prepTimerRef.current);
+      prepTimerRef.current = setTimeout(() => {
+        if (!pickerOpenRef.current) return;
+        setPreparing(true);
+        // Safety net for browsers without the `cancel` event.
+        prepTimerRef.current = setTimeout(stopPreparing, PREPARE_TIMEOUT_MS);
+      }, PREPARE_DELAY_MS);
+    };
+    window.addEventListener("focus", onBack);
+    document.addEventListener("visibilitychange", onBack);
+    return () => {
+      window.removeEventListener("focus", onBack);
+      document.removeEventListener("visibilitychange", onBack);
+      clearTimeout(prepTimerRef.current);
+    };
+  }, []);
+
+  const showToast = (title, message) => {
+    clearTimeout(toastTimerRef.current);
+    setToast({ title, message });
+    toastTimerRef.current = setTimeout(() => setToast({ title: "", message: "" }), TOAST_MS);
+  };
+
+  // The parent enforces the mobile cap and skips duplicates. This only filters by type.
+  const handleFiles = (list) => {
+    const { accepted, rejected } = splitFiles(list);
+    if (rejected.length) showToast("Files Skipped", rejectionMessage(rejected));
+    if (accepted.length) onFilesAdded(accepted);
+  };
+
+  const openPicker = () => {
+    if (fileInputRef.current) fileInputRef.current.value = "";
+    pickerOpenRef.current = true;
+    fileInputRef.current?.click();
   };
 
   const handleFileChange = (e) => {
-    if (!e.target.files) return;
-    const images = toImages(e.target.files);
-    if (images.length) handleFiles(images);
+    stopPreparing();
+    const picked = e.target.files ? Array.from(e.target.files) : [];
+    e.target.value = ""; // lets the same file be picked again later
+    if (picked.length) handleFiles(picked);
   };
 
   const handleDrop = (e) => {
     e.preventDefault();
-    if (!e.dataTransfer.files) return;
-    const images = toImages(e.dataTransfer.files);
-    if (images.length) handleFiles(images);
+    const dropped = e.dataTransfer?.files;
+    if (dropped?.length) handleFiles(dropped);
   };
 
   const handleDragOver = (e) => e.preventDefault();
@@ -182,7 +254,6 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
   const isEmpty = files.length === 0;
   const [isDragging, setIsDragging] = useState(false);
   const dragDepth = useRef(0);
-  const gridRef = useRef(null);
   const iconRef = useRef(null);
 
   const hasFiles = (e) => Array.from(e.dataTransfer?.types || []).includes("Files");
@@ -210,36 +281,16 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
     return () => ctx.revert();
   }, [isDragging, isEmpty]);
 
-  useIsoLayoutEffect(() => {
-    const grid = gridRef.current;
-    if (!grid) return;
-    const fresh = Array.from(grid.querySelectorAll("[data-tile]:not([data-seen])"));
-    if (!fresh.length) return;
-    fresh.forEach((el) => el.setAttribute("data-seen", "1"));
-    if (prefersReducedMotion()) return;
-    gsap.fromTo(
-      fresh.slice(0, 48),
-      { opacity: 0, y: 12, scale: 0.94 },
-      {
-        opacity: 1,
-        y: 0,
-        scale: 1,
-        duration: 0.55,
-        ease: "power3.out",
-        stagger: 0.03,
-        overwrite: "auto",
-        clearProps: "opacity,transform",
-      }
-    );
-  }, [files]);
-
   const emptyKeyDown = (e) => {
     if (e.target !== e.currentTarget) return;
     if (e.key === "Enter" || e.key === " ") {
       e.preventDefault();
-      fileInputRef.current?.click();
+      openPicker();
     }
   };
+
+  const toastVisible = Boolean(toast.message);
+  const showLoader = Boolean(adding) || preparing;
 
   return (
     <div
@@ -257,11 +308,10 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
               isDragging ? "bg-[var(--accent)]" : "bg-white hover:bg-neutral-50"
             }`
       }`}
-      onClick={() => {
-        if (files.length === 0) {
-          if (fileInputRef.current) fileInputRef.current.value = "";
-          fileInputRef.current?.click();
-        }
+      onClick={(e) => {
+        // Ignore the click the hidden input bubbles up when we open the picker.
+        if (e.target === fileInputRef.current) return;
+        if (files.length === 0) openPicker();
       }}
       {...(isEmpty
         ? { role: "button", tabIndex: 0, "aria-label": "Select images to compress", onKeyDown: emptyKeyDown }
@@ -269,23 +319,64 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
     >
       <style>{DZ_CSS}</style>
 
-      {/* Brutalist Limit Toast */}
+      {/* Brutalist toast, used for skipped (unsupported) files */}
       <div
-        aria-hidden={!limitError}
+        role="status"
+        aria-live="polite"
+        aria-hidden={!toastVisible}
         className={`absolute left-4 right-4 top-4 z-50 flex items-start gap-4 rounded-none border-[3px] border-neutral-900 bg-[#FFE600] p-4 shadow-[4px_4px_0_rgba(17,17,17,1)] transition-all duration-300 ${
-          limitError ? "translate-y-0 opacity-100" : "-translate-y-4 opacity-0 pointer-events-none"
+          toastVisible ? "translate-y-0 opacity-100" : "-translate-y-4 opacity-0 pointer-events-none"
         }`}
       >
-        <svg className="mt-0.5 h-6 w-6 shrink-0 text-neutral-900" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor">
+        <svg className="mt-0.5 h-6 w-6 shrink-0 text-neutral-900" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor" aria-hidden="true">
           <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
         </svg>
-        <div>
-          <h3 className="text-xs font-black uppercase tracking-wide text-neutral-900">Mobile Limit Reached</h3>
-          <p className="mt-1 text-xs font-medium text-neutral-800">
-            To prevent Browser from crashing, mobile batches are capped at {MAX_MOBILE_FILES} images at a time. Desktops are unlimited.
-          </p>
+        <div className="min-w-0">
+          <h3 className="text-xs font-black uppercase tracking-wide text-neutral-900">{toast.title}</h3>
+          <p className="mt-1 break-words text-xs font-medium text-neutral-800">{toast.message}</p>
         </div>
       </div>
+
+      {/* Loader: "getting your images ready" (picker gap) or "preparing images 12 / 50" (RAM copies) */}
+      {showLoader && (
+        <div
+          role="status"
+          aria-live="polite"
+          className={
+            isEmpty
+              ? "absolute inset-0 z-40 flex flex-col items-center justify-center gap-5 bg-white/95 px-6 text-center"
+              : "absolute inset-x-0 bottom-0 z-40 flex items-center gap-4 border-t-[3px] border-neutral-900 bg-[#FFE600] px-5 py-3"
+          }
+        >
+          <PixelMosaic size={isEmpty ? 44 : 22} grid={4} />
+          <div className={isEmpty ? "w-full max-w-xs" : "min-w-0 flex-1"}>
+            <p className="text-xs font-black uppercase tracking-widest text-neutral-900">
+              {adding ? (
+                <>
+                  Preparing images{" "}
+                  <span className="font-mono">
+                    {Math.min(adding.done, adding.total)} / {adding.total}
+                  </span>
+                </>
+              ) : (
+                "Getting your images ready..."
+              )}
+            </p>
+            <div className="mt-2 h-2.5 w-full overflow-hidden border-[2px] border-neutral-900 bg-white">
+              <div
+                className={`h-full bg-[var(--accent)] ${
+                  adding ? "transition-[width] duration-150" : "w-full animate-pulse"
+                }`}
+                style={
+                  adding
+                    ? { width: `${adding.total ? (adding.done / adding.total) * 100 : 0}%` }
+                    : undefined
+                }
+              />
+            </div>
+          </div>
+        </div>
+      )}
 
       {files.length > 0 ? (
         <div className="flex h-full w-full cursor-default flex-col">
@@ -302,10 +393,9 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
                 Clear all
               </button>
               <button
-                onClick={(e) => { 
-                  e.stopPropagation(); 
-                  if (fileInputRef.current) fileInputRef.current.value = "";
-                  fileInputRef.current?.click(); 
+                onClick={(e) => {
+                  e.stopPropagation();
+                  openPicker();
                 }}
                 className="cursor-pointer rounded-none border-[2px] border-neutral-900 bg-[var(--accent)] px-4 py-1.5 text-xs font-black uppercase tracking-widest text-neutral-900 shadow-[2px_2px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[4px_4px_0_rgba(17,17,17,1)] active:translate-y-0 active:translate-x-0 active:shadow-none focus-visible:outline-none"
               >
@@ -315,12 +405,11 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
           </div>
 
           <div
-            ref={gridRef}
             data-lenis-prevent
             className="dz-scroll grid min-h-0 flex-1 grid-cols-3 gap-5 overflow-y-auto bg-neutral-50 p-5 pr-6 sm:grid-cols-4 md:grid-cols-5 lg:grid-cols-6"
           >
-            {files.map((fileObj) => (
-              <ImagePreview key={fileObj.id} fileObj={fileObj} onRemove={onRemoveFile} />
+            {files.map((fileObj, i) => (
+              <ImagePreview key={fileObj.id} fileObj={fileObj} index={i} onRemove={onRemoveFile} />
             ))}
           </div>
 
@@ -379,7 +468,7 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
           </div>
         </>
       )}
-      
+
       <input
         ref={fileInputRef}
         type="file"
@@ -387,6 +476,7 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
         multiple
         accept="image/*,.heic,.heif"
         onChange={handleFileChange}
+        onCancel={stopPreparing}
       />
     </div>
   );

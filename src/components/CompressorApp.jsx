@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import gsap from "gsap";
 import CompressionControls from "@/components/CompressionControls";
 import ImageDropzone from "@/components/ImageDropzone";
@@ -8,12 +8,23 @@ import WelcomeModal from "@/components/WelcomeModal";
 import { LoadingOverlay, PixelStyles } from "@/components/PixelLoader";
 import { getLenis } from "@/components/SmoothScroll";
 import { compressLocally } from "@/lib/localCompress";
+import { isHeicFile } from "@/lib/fileTypes";
+import {
+  MAX_MOBILE_FILES,
+  getConcurrency,
+  getPartLimit,
+  isMobileDevice,
+  prefersReducedMotion,
+} from "@/lib/device";
+
+const ADD_CHUNK = 8; // files admitted per UI update while adding
+const NOTICE_MS = 6000;
 
 function formatBytes(bytes, decimals = 2) {
-  if (!+bytes) return '0 Bytes';
+  if (!+bytes) return "0 Bytes";
   const k = 1024;
   const dm = decimals < 0 ? 0 : decimals;
-  const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB'];
+  const sizes = ["Bytes", "KB", "MB", "GB", "TB"];
   const i = Math.floor(Math.log(bytes) / Math.log(k));
   return `${parseFloat((bytes / Math.pow(k, i)).toFixed(dm))} ${sizes[i]}`;
 }
@@ -24,7 +35,8 @@ const stripExt = (name) => {
 };
 
 const base64Size = (b64) =>
-  Math.floor((b64.length * 3) / 4) - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
+  Math.floor((b64.length * 3) / 4) -
+  (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
 
 const makeNameRegistry = () => {
   const used = new Set();
@@ -34,37 +46,23 @@ const makeNameRegistry = () => {
     const ext = dot > 0 ? name.slice(dot) : "";
     let candidate = name;
     let n = 1;
-    while (used.has(candidate.toLowerCase())) candidate = `${base} (${n++})${ext}`;
+    while (used.has(candidate.toLowerCase()))
+      candidate = `${base} (${n++})${ext}`;
     used.add(candidate.toLowerCase());
     return candidate;
   };
 };
 
-const isMobileDevice = () => {
-  if (typeof window === "undefined") return false;
-  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
-};
-
-// Start a new zip after 40MB on mobile, or 250MB on desktop.
-const getPartLimit = () => isMobileDevice() ? 40 * 1024 * 1024 : 250 * 1024 * 1024;
-
-const getConcurrency = () => {
-  if (isMobileDevice()) return 1;
-  const cores = navigator.hardwareConcurrency || 4;
-  const memory = typeof navigator.deviceMemory === "number" ? navigator.deviceMemory : 4;
-  return Math.max(1, Math.min(3, Math.floor(cores / 2), memory <= 4 ? 2 : 3));
-};
-
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// Same name + size + modified time means the same file picked twice.
+const fileKey = (f) => `${f.name}|${f.size}|${f.lastModified}`;
 
 let idCounter = 0;
 const makeId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${(idCounter++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-
-const prefersReducedMotion = () =>
-  typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const PAGE_CSS = `
 .ps-reveal,.ps-word{opacity:0;animation:ps-failsafe 0s linear 3.5s forwards}
@@ -113,10 +111,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const [quality, setQuality] = useState(80);
   const [format, setFormat] = useState("webp");
 
-  const [engine, setEngine] = useState(imagekitAvailable ? "imagekit" : "local");
+  const [engine, setEngine] = useState("local");
   const activeEngine = imagekitAvailable ? engine : "local";
   const [maxKB, setMaxKB] = useState("");
-  const [keepIfLarger, setKeepIfLarger] = useState(false);
+  const [keepIfLarger, setKeepIfLarger] = useState(true);
 
   const [isProcessing, setIsProcessing] = useState(false);
   const [stage, setStage] = useState("compress");
@@ -128,10 +126,27 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const [compressedSize, setCompressedSize] = useState(0);
   const [showResults, setShowResults] = useState(false);
   const [downloads, setDownloads] = useState([]);
-  const [runInfo, setRunInfo] = useState({ ok: 0, imagekit: 0, local: 0, kept: 0, failed: [], stopped: 0 });
+  const [runInfo, setRunInfo] = useState({
+    ok: 0,
+    imagekit: 0,
+    local: 0,
+    kept: 0,
+    failed: [],
+    stopped: 0,
+    cancelled: false,
+  });
+  const [markActive, setMarkActive] = useState(false);
+  const [notice, setNotice] = useState("");
+
+  const [adding, setAdding] = useState(null); // { done, total } while HEIC copies run (phones)
+  const addTotalRef = useRef(0);
+  const addDoneRef = useRef(0);
 
   const cancelRef = useRef(false);
   const urlsRef = useRef([]);
+  // Always holds the latest queue, so async code never works from a stale list.
+  const filesRef = useRef([]);
+  const noticeTimerRef = useRef(null);
 
   const pageRef = useRef(null);
   const buttonWrapRef = useRef(null);
@@ -142,51 +157,122 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const savedRef = useRef(null);
   const barRef = useRef(null);
 
-  const handleFilesAdded = useCallback(async (newFilesArray) => {
-    const filesWithIds = [];
-
-    // Use a for...of loop instead of Promise.all to prevent freezing the UI
-    for (const file of newFilesArray) {
-      let safeFile = file;
-      const isHeic =
-        file.name.toLowerCase().endsWith(".heic") ||
-        file.name.toLowerCase().endsWith(".heif") ||
-        file.type === "image/heic" ||
-        file.type === "image/heif";
-
-      // EAGER LOADING FIX (SEQUENTIAL):
-      if (isHeic) {
-        try {
-          const buffer = await file.arrayBuffer();
-          safeFile = new Blob([buffer], { type: file.type || "image/heic" });
-          safeFile.name = file.name; 
-          safeFile.lastModified = file.lastModified;
-        } catch (err) {
-          console.warn(`Could not eager-load ${file.name} into RAM:`, err);
-        }
-      }
-
-      filesWithIds.push({
-        id: makeId(),
-        file: safeFile,
-      });
-
-      // Micro-yield: Gives the phone's CPU a tiny break so CSS animations 
-      // (like the dropzone flash) stay perfectly smooth while reading large batches.
-      await new Promise((resolve) => setTimeout(resolve, 10));
+  // Can this device share files (the "Save to Files" sheet on phones)?
+  const canShareZip = useMemo(() => {
+    try {
+      return (
+        isMobileDevice() &&
+        typeof navigator.canShare === "function" &&
+        navigator.canShare({
+          files: [new File([""], "pixshrink.zip", { type: "application/zip" })],
+        })
+      );
+    } catch {
+      return false;
     }
-
-    setFiles((prev) => [...prev, ...filesWithIds]);
-    setShowResults(false);
   }, []);
 
-  const handleRemoveFile = useCallback((idToRemove) => {
-    setFiles((prev) => prev.filter((f) => f.id !== idToRemove));
+  const commitFiles = useCallback((updater) => {
+    const next = updater(filesRef.current);
+    filesRef.current = next;
+    setFiles(next);
   }, []);
 
-  const handleClearAll = useCallback(() => {
-    setFiles([]);
+  const showNotice = useCallback((message) => {
+    clearTimeout(noticeTimerRef.current);
+    setNotice(message);
+    noticeTimerRef.current = setTimeout(() => setNotice(""), NOTICE_MS);
   }, []);
+
+  useEffect(() => () => clearTimeout(noticeTimerRef.current), []);
+
+  const handleFilesAdded = useCallback(
+    async (incoming) => {
+      const mobile = isMobileDevice();
+      const stats = { dupes: 0, overCap: 0 };
+
+      // Phase 1 (instant): validate and show every tile right away. No bytes are read yet,
+      // and there is no await, so the cap/duplicate checks can't race with another add.
+      const current = filesRef.current;
+      const seen = new Set(current.map((f) => f.key));
+      let room = mobile ? MAX_MOBILE_FILES - current.length : Infinity;
+      const accepted = [];
+      for (const file of incoming) {
+        const key = fileKey(file);
+        if (seen.has(key)) {
+          stats.dupes++;
+          continue;
+        }
+        if (room <= 0) {
+          stats.overCap++;
+          continue;
+        }
+        seen.add(key);
+        room--;
+        accepted.push({ id: makeId(), key, file });
+      }
+      if (accepted.length) commitFiles((prev) => [...prev, ...accepted]);
+      setShowResults(false);
+
+      const parts = [];
+      if (stats.overCap) {
+        parts.push(
+          `${stats.overCap} not added: mobile batches are capped at ${MAX_MOBILE_FILES} images`,
+        );
+      }
+      if (stats.dupes) {
+        parts.push(
+          `${stats.dupes} duplicate${stats.dupes === 1 ? "" : "s"} skipped`,
+        );
+      }
+      if (parts.length) showNotice(`${parts.join(". ")}.`);
+
+      // Phase 2 (background, phones only): copy each HEIC into RAM so it stays readable.
+      // The tile's `file` is swapped when its copy is ready.
+      const heics = mobile ? accepted.filter((a) => isHeicFile(a.file)) : [];
+      if (!heics.length) return;
+
+      addTotalRef.current += heics.length;
+      setAdding({ done: addDoneRef.current, total: addTotalRef.current });
+
+      for (const item of heics) {
+        try {
+          const buffer = await item.file.arrayBuffer();
+          const safe = new File([buffer], item.file.name, {
+            type: item.file.type || "image/heic",
+            lastModified: item.file.lastModified,
+          });
+          commitFiles((prev) =>
+            prev.map((f) => (f.id === item.id ? { ...f, file: safe } : f)),
+          );
+        } catch (err) {
+          console.warn(`Could not eager-load ${item.file.name} into RAM:`, err);
+        }
+
+        addDoneRef.current++;
+        if (addDoneRef.current >= addTotalRef.current) {
+          addDoneRef.current = 0;
+          addTotalRef.current = 0;
+          setAdding(null);
+        } else {
+          setAdding({ done: addDoneRef.current, total: addTotalRef.current });
+        }
+        await sleep(10);
+      }
+    },
+    [commitFiles, showNotice],
+  );
+
+  const handleRemoveFile = useCallback(
+    (idToRemove) =>
+      commitFiles((prev) => prev.filter((f) => f.id !== idToRemove)),
+    [commitFiles],
+  );
+
+  const handleClearAll = useCallback(
+    () => commitFiles(() => []),
+    [commitFiles],
+  );
 
   useEffect(() => {
     if (!isProcessing) return;
@@ -196,6 +282,41 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     };
     window.addEventListener("beforeunload", warn);
     return () => window.removeEventListener("beforeunload", warn);
+  }, [isProcessing]);
+
+  // Keep the screen awake while processing. A sleeping phone suspends the tab and the batch dies.
+  // The browser drops the lock when the tab is hidden, so ask again when it comes back.
+  useEffect(() => {
+    if (
+      !isProcessing ||
+      typeof navigator === "undefined" ||
+      !("wakeLock" in navigator)
+    )
+      return;
+    let lock = null;
+    let cancelled = false;
+
+    const acquire = async () => {
+      try {
+        const l = await navigator.wakeLock.request("screen");
+        if (cancelled) l.release().catch(() => {});
+        else lock = l;
+      } catch {
+        // Denied (e.g. low battery mode). Processing still works, the screen may just sleep.
+      }
+    };
+    const onVisible = () => {
+      if (document.visibilityState === "visible" && (!lock || lock.released))
+        acquire();
+    };
+
+    acquire();
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      cancelled = true;
+      document.removeEventListener("visibilitychange", onVisible);
+      lock?.release().catch(() => {});
+    };
   }, [isProcessing]);
 
   useEffect(() => {
@@ -223,7 +344,8 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       const { default: JSZip } = await import("jszip");
 
       const uniqueName = makeNameRegistry();
-      const targetKB = Number(maxKB) > 0 && format !== "png" ? Number(maxKB) : 0;
+      const targetKB =
+        Number(maxKB) > 0 && format !== "png" ? Number(maxKB) : 0;
 
       const stats = { imagekit: 0, local: 0, kept: 0 };
       const succeeded = new Set();
@@ -234,7 +356,8 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
       let current = { zip: new JSZip(), bytes: 0 };
       const partJobs = [];
-      const generate = (zip) => zip.generateAsync({ type: "blob", compression: "STORE" });
+      const generate = (zip) =>
+        zip.generateAsync({ type: "blob", compression: "STORE" });
       const addToZip = (name, content, options, size) => {
         current.zip.file(uniqueName(name), content, options);
         current.bytes += size;
@@ -252,7 +375,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         formData.append("quality", quality.toString());
         formData.append("format", format);
 
-        const res = await fetch("/api/compress", { method: "POST", body: formData });
+        const res = await fetch("/api/compress", {
+          method: "POST",
+          body: formData,
+        });
         if (!res.ok) throw new Error(`Server returned ${res.status}`);
         const data = await res.json();
         if (!data.success) throw new Error(data.error || "Unknown error");
@@ -267,7 +393,11 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
       const viaLocal = async (file, allowFallback) => {
         const { blob, format: usedFormat } = await compressLocally(file, {
-          width, quality, format, maxKB: targetKB, allowFallback,
+          width,
+          quality,
+          format,
+          maxKB: targetKB,
+          allowFallback,
         });
         return {
           name: `${stripExt(file.name)}_compressed.${usedFormat}`,
@@ -290,7 +420,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
               out = await viaImageKit(obj.file);
               used = "imagekit";
             } catch (err) {
-              console.warn(`ImageKit failed for ${obj.file.name}, using local engine:`, err.message);
+              console.warn(
+                `ImageKit failed for ${obj.file.name}, using local engine:`,
+                err.message,
+              );
               out = await viaLocal(obj.file, true);
               used = "local";
             }
@@ -317,15 +450,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           completedCount++;
           setDoneCount(completedCount);
           setProgress((completedCount / queue.length) * 100);
-          
-          // ADAPTIVE GARBAGE COLLECTION YIELD
-          if (isMobileDevice()) {
-            // Massive files (> 5MB) get a 600ms sleep to ensure iOS drops the RAM. Normal files get 150ms.
-            const sleepTime = obj.file.size > 5 * 1024 * 1024 ? 600 : 150;
-            await sleep(sleepTime);
-          } else {
-            await sleep(10); // Tiny tick for desktop just to keep the UI smooth
-          }
+
+          // Short yield so the UI stays responsive. Memory is handled in encodeCore
+          // (decode-time downscale + canvas release), not by waiting.
+          await sleep(isMobileDevice() ? 50 : 10);
         }
       };
 
@@ -336,20 +464,36 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           await handleOne(obj);
         }
       };
-      await Promise.all(Array.from({ length: getConcurrency() }, runner));
+      const cloudOnly = activeEngine === "imagekit" && !targetKB;
+      await Promise.all(
+        Array.from(
+          { length: getConcurrency(cloudOnly ? "imagekit" : "local") },
+          runner,
+        ),
+      );
 
+      const wasCancelled = cancelRef.current;
       const okCount = succeeded.size;
-      const notAttempted = cancelRef.current ? queue.length - succeeded.size - failed.length : 0;
+      const notAttempted = wasCancelled
+        ? queue.length - succeeded.size - failed.length
+        : 0;
 
       setOriginalSize(okOriginalBytes);
       setCompressedSize(totalCompressedBytes);
-      setRunInfo({ ok: okCount, ...stats, failed, stopped: notAttempted });
+      setRunInfo({
+        ok: okCount,
+        ...stats,
+        failed,
+        stopped: notAttempted,
+        cancelled: wasCancelled,
+      });
 
       if (okCount > 0) {
         setStage("zip");
         setProgress(100);
 
-        if (current.bytes > 0 || partJobs.length === 0) partJobs.push(generate(current.zip));
+        if (current.bytes > 0 || partJobs.length === 0)
+          partJobs.push(generate(current.zip));
         const blobs = await Promise.all(partJobs);
 
         const ready = blobs.map((blob, i) => ({
@@ -358,11 +502,17 @@ export default function CompressorApp({ imagekitAvailable = false }) {
               ? "pixshrink_compressed.zip"
               : `pixshrink_compressed_part${i + 1}.zip`,
           url: URL.createObjectURL(blob),
+          size: blob.size,
+          blob,
         }));
         urlsRef.current = ready.map((d) => d.url);
         setDownloads(ready);
 
+        // Try to start the download ourselves. Browsers may still block it (the tap that
+        // started this run is long gone), which is why the results panel has real buttons.
         for (let i = 0; i < ready.length; i++) {
+          // Phones block or confuse several automatic downloads, so only start the first.
+          if (i > 0 && isMobileDevice()) break;
           if (i > 0) await sleep(400);
           const a = document.createElement("a");
           a.href = ready[i].url;
@@ -374,11 +524,16 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       }
 
       setShowResults(true);
-      setFiles((prev) => prev.filter((f) => !succeeded.has(f.id)));
+      commitFiles((prev) => prev.filter((f) => !succeeded.has(f.id)));
     } catch (error) {
       console.error("Batch failed:", error);
       setRunInfo({
-        ok: 0, imagekit: 0, local: 0, kept: 0, stopped: 0,
+        ok: 0,
+        imagekit: 0,
+        local: 0,
+        kept: 0,
+        stopped: 0,
+        cancelled: false,
         failed: [{ name: "Batch", reason: error.message }],
       });
       setShowResults(true);
@@ -388,36 +543,51 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     }
   };
 
-  const percentSaved = originalSize > 0
-    ? Math.round(((originalSize - compressedSize) / originalSize) * 100)
-    : 0;
+  const shareZip = async (d) => {
+    try {
+      const file = new File([d.blob], d.name, { type: "application/zip" });
+      if (navigator.canShare?.({ files: [file] })) {
+        await navigator.share({ files: [file], title: d.name });
+      }
+    } catch (err) {
+      // AbortError just means the user closed the share sheet.
+      if (err?.name !== "AbortError") console.warn("Share failed:", err);
+    }
+  };
+
+  const percentSaved =
+    originalSize > 0
+      ? Math.round(((originalSize - compressedSize) / originalSize) * 100)
+      : 0;
 
   const breakdown = [
     runInfo.imagekit > 0 && `${runInfo.imagekit} via ImageKit`,
     runInfo.local > 0 && `${runInfo.local} in your browser`,
     runInfo.kept > 0 && `${runInfo.kept} kept as original`,
-  ].filter(Boolean).join(" · ");
+  ]
+    .filter(Boolean)
+    .join(" · ");
 
-  const hasHeic = files.some(
-    (f) =>
-      f.file.name.toLowerCase().endsWith(".heic") ||
-      f.file.name.toLowerCase().endsWith(".heif") ||
-      f.file.type === "image/heic" ||
-      f.file.type === "image/heif"
-  );
+  const hasHeic = files.some((f) => isHeicFile(f.file));
 
   const isDisabled = files.length === 0 || isProcessing;
   const resultsReady = showResults && !isProcessing && runInfo.ok > 0;
-  const resultsFailed = showResults && !isProcessing && runInfo.ok === 0;
-  
+  const resultsEmpty = showResults && !isProcessing && runInfo.ok === 0;
+  const resultsFailed = resultsEmpty && !runInfo.cancelled;
+  const resultsCancelled = resultsEmpty && runInfo.cancelled;
+
   const engineLabel =
     activeEngine === "local"
       ? "Runs in your browser"
       : activeEngine === "auto"
-      ? "Cloud with local fallback"
-      : "Cloud engine";
+        ? "Cloud with local fallback"
+        : "Cloud engine";
 
-  const [markActive, setMarkActive] = useState(false);
+  // Based on the prop, not the live engine: the headline words animate once on mount,
+  // so changing their text later would show new words invisible.
+  const heroSub = imagekitAvailable
+    ? "Local or cloud, you choose."
+    : "Keep them on your device.";
 
   const scrollToTop = (e) => {
     e.preventDefault();
@@ -436,18 +606,26 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       tl.fromTo(
         root.querySelectorAll("[data-reveal]"),
         { y: 22, opacity: 0 },
-        { y: 0, opacity: 1, duration: 1, stagger: 0.11, clearProps: "transform" },
-        0.1
+        {
+          y: 0,
+          opacity: 1,
+          duration: 1,
+          stagger: 0.11,
+          clearProps: "transform",
+        },
+        0.1,
       ).fromTo(
         root.querySelectorAll(".ps-word"),
         { yPercent: 115, opacity: 1 },
         { yPercent: 0, duration: 1.3, stagger: 0.07 },
-        0.2
+        0.2,
       );
     });
 
     mm.add("(prefers-reduced-motion: reduce)", () => {
-      gsap.set(root.querySelectorAll("[data-reveal], .ps-word"), { opacity: 1 });
+      gsap.set(root.querySelectorAll("[data-reveal], .ps-word"), {
+        opacity: 1,
+      });
     });
 
     return () => mm.revert();
@@ -457,7 +635,11 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     const btn = buttonRef.current;
     const wrap = buttonWrapRef.current;
     if (!btn || !wrap || isDisabled) return;
-    if (prefersReducedMotion() || !window.matchMedia("(hover: hover) and (pointer: fine)").matches) return;
+    if (
+      prefersReducedMotion() ||
+      !window.matchMedia("(hover: hover) and (pointer: fine)").matches
+    )
+      return;
 
     const xTo = gsap.quickTo(btn, "x", { duration: 0.6, ease: "power3.out" });
     const yTo = gsap.quickTo(btn, "y", { duration: 0.6, ease: "power3.out" });
@@ -467,7 +649,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       xTo((e.clientX - (r.left + r.width / 2)) * 0.04);
       yTo((e.clientY - (r.top + r.height / 2)) * 0.12);
     };
-    
+
     const leave = () => {
       xTo(0);
       yTo(0);
@@ -491,7 +673,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     const newEl = newSizeRef.current;
     const savedEl = savedRef.current;
     const bar = barRef.current;
-    const ratio = originalSize > 0 ? Math.min(1, Math.max(0, compressedSize / originalSize)) : 0;
+    const ratio =
+      originalSize > 0
+        ? Math.min(1, Math.max(0, compressedSize / originalSize))
+        : 0;
     const savedAbs = Math.abs(percentSaved);
 
     const writeFinal = () => {
@@ -512,7 +697,13 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         gsap.fromTo(
           root,
           { y: 18, opacity: 0 },
-          { y: 0, opacity: 1, duration: 0.7, ease: "power3.out", clearProps: "transform" }
+          {
+            y: 0,
+            opacity: 1,
+            duration: 0.7,
+            ease: "power3.out",
+            clearProps: "transform",
+          },
         );
         if (bar) gsap.fromTo(bar, { scaleX: 1 }, { scaleX: ratio, ...timing });
         gsap.to(counter, {
@@ -521,10 +712,13 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           onUpdate: () => {
             if (newEl) {
               newEl.textContent = formatBytes(
-                Math.round(originalSize + (compressedSize - originalSize) * counter.p)
+                Math.round(
+                  originalSize + (compressedSize - originalSize) * counter.p,
+                ),
               );
             }
-            if (savedEl) savedEl.textContent = String(Math.round(savedAbs * counter.p));
+            if (savedEl)
+              savedEl.textContent = String(Math.round(savedAbs * counter.p));
           },
           onComplete: writeFinal,
         });
@@ -535,7 +729,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     if (rect.bottom > window.innerHeight) {
       const lenis = getLenis();
       if (lenis) {
-        lenis.scrollTo(root, { offset: -Math.max(24, (window.innerHeight - root.offsetHeight) / 2), duration: 1.2 });
+        lenis.scrollTo(root, {
+          offset: -Math.max(24, (window.innerHeight - root.offsetHeight) / 2),
+          duration: 1.2,
+        });
       } else {
         root.scrollIntoView({ behavior: "smooth", block: "center" });
       }
@@ -547,9 +744,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     };
   }, [resultsReady, originalSize, compressedSize, percentSaved]);
 
+  // Animates whichever "nothing finished" panel is showing (error or cancelled).
   useEffect(() => {
     const el = errorRef.current;
-    if (!resultsFailed || !el) return;
+    if (!resultsEmpty || !el) return;
     if (prefersReducedMotion()) {
       gsap.set(el, { opacity: 1 });
       return;
@@ -557,10 +755,16 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     const tween = gsap.fromTo(
       el,
       { y: 12, opacity: 0 },
-      { y: 0, opacity: 1, duration: 0.5, ease: "power3.out", clearProps: "transform" }
+      {
+        y: 0,
+        opacity: 1,
+        duration: 0.5,
+        ease: "power3.out",
+        clearProps: "transform",
+      },
     );
     return () => tween.kill();
-  }, [resultsFailed]);
+  }, [resultsEmpty]);
 
   return (
     <main
@@ -570,10 +774,12 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       <PixelStyles />
       <style>{PAGE_CSS}</style>
       <WelcomeModal />
-      
+
       {isProcessing && (
         <LoadingOverlay
-          title={stage === "zip" ? "Packing your zip" : "Compressing your images"}
+          title={
+            stage === "zip" ? "Packing your zip" : "Compressing your images"
+          }
           detail={
             stage === "zip"
               ? "Almost there. Your download starts on its own."
@@ -592,7 +798,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         />
       )}
 
-      <header data-reveal className="ps-reveal border-b-[3px] border-neutral-900 bg-white">
+      <header
+        data-reveal
+        className="ps-reveal border-b-[3px] border-neutral-900 bg-white"
+      >
         <div className="mx-auto flex w-full max-w-[1760px] items-center justify-between px-4 py-4 sm:px-6 sm:py-5 lg:px-10 2xl:px-14">
           <a
             href="/"
@@ -604,18 +813,47 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             aria-label="PixShrink, back to top"
             className="inline-flex items-center gap-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/30 focus-visible:ring-offset-4 focus-visible:ring-offset-white"
           >
-            <svg 
-              className="h-[1.85rem] w-[1.85rem] shrink-0 overflow-visible" 
-              viewBox="0 0 100 100" 
+            <svg
+              className="h-[1.85rem] w-[1.85rem] shrink-0 overflow-visible"
+              viewBox="0 0 100 100"
               xmlns="http://www.w3.org/2000/svg"
               aria-hidden="true"
             >
               <rect x="25" y="25" width="70" height="70" fill="#111111" />
-              <g className={`transition-transform duration-200 ease-out ${markActive ? "-translate-y-2.5 translate-x-1.5" : ""}`}>
-                <rect x="5" y="5" width="70" height="70" fill="#ffffff" stroke="#111111" strokeWidth="6" strokeLinejoin="miter" />
+              <g
+                className={`transition-transform duration-200 ease-out ${markActive ? "-translate-y-2.5 translate-x-1.5" : ""}`}
+              >
+                <rect
+                  x="5"
+                  y="5"
+                  width="70"
+                  height="70"
+                  fill="#ffffff"
+                  stroke="#111111"
+                  strokeWidth="6"
+                  strokeLinejoin="miter"
+                />
                 <rect x="15" y="15" width="22" height="22" fill="#111111" />
-                <rect x="15" y="43" width="22" height="22" fill="var(--accent)" stroke="#111111" strokeWidth="4" strokeLinejoin="miter" />
-                <rect x="43" y="15" width="22" height="22" fill="var(--accent)" stroke="#111111" strokeWidth="4" strokeLinejoin="miter" />
+                <rect
+                  x="15"
+                  y="43"
+                  width="22"
+                  height="22"
+                  fill="var(--accent)"
+                  stroke="#111111"
+                  strokeWidth="4"
+                  strokeLinejoin="miter"
+                />
+                <rect
+                  x="43"
+                  y="15"
+                  width="22"
+                  height="22"
+                  fill="var(--accent)"
+                  stroke="#111111"
+                  strokeWidth="4"
+                  strokeLinejoin="miter"
+                />
               </g>
             </svg>
             <span className="font-[family-name:var(--font-pixel)] text-[1.55rem] font-semibold leading-none tracking-tight text-neutral-900 sm:text-[1.7rem]">
@@ -626,14 +864,16 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       </header>
 
       <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-10 px-4 py-8 sm:px-6 sm:py-12 lg:flex-row lg:items-start lg:gap-16 lg:px-10 lg:py-20 2xl:gap-24 2xl:px-14">
-        
         <aside className="flex flex-col gap-8 lg:sticky lg:top-10 lg:w-[400px] xl:w-[460px] shrink-0">
           <div>
             <div
               data-reveal
               className="ps-reveal mb-6 inline-flex items-center gap-2 rounded-none border-[2px] border-neutral-900 bg-white px-3 py-1 text-xs font-bold uppercase tracking-wider text-neutral-900 shadow-[2px_2px_0_rgba(17,17,17,1)]"
             >
-              <span aria-hidden="true" className="ps-blink h-2 w-2 rounded-full bg-[var(--accent)]" />
+              <span
+                aria-hidden="true"
+                className="ps-blink h-2 w-2 rounded-full bg-[var(--accent)]"
+              />
               {engineLabel}
             </div>
 
@@ -642,7 +882,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                 <Words text="Shrink images in bulk." />
               </span>
               <span className="block text-neutral-400">
-                <Words text="Keep them on your device." />
+                <Words text={heroSub} />
               </span>
             </h1>
 
@@ -658,34 +898,65 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
           <div data-reveal className="ps-reveal mt-8 hidden w-full lg:block">
             <div className="flex h-[400px] w-full flex-col items-center justify-center rounded-none border-[3px] border-neutral-900 bg-neutral-100 shadow-[6px_6px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 hover:shadow-[10px_10px_0_rgba(17,17,17,1)]">
-              <span className="font-mono text-xs font-bold uppercase tracking-widest text-neutral-400">Ad Space</span>
-              <span className="mt-2 max-w-[200px] text-center text-xs text-neutral-400">Reserved for future high-visibility vertical placement</span>
+              <span className="font-mono text-xs font-bold uppercase tracking-widest text-neutral-400">
+                Ad Space
+              </span>
+              <span className="mt-2 max-w-[200px] text-center text-xs text-neutral-400">
+                Reserved for future high-visibility vertical placement
+              </span>
             </div>
           </div>
         </aside>
 
         <div className="flex-1 space-y-14 sm:space-y-20 lg:pt-4">
-          
           <section data-reveal className="ps-reveal">
             <StepLabel n={1}>Add your images</StepLabel>
-            
+
             {hasHeic && (
               <div className="mb-6 rounded-none border-[3px] border-neutral-900 bg-[#FFE600] p-5 shadow-[4px_4px_0_rgba(17,17,17,1)] text-left">
                 <div className="flex items-start gap-4">
-                  <svg className="mt-0.5 h-6 w-6 shrink-0 text-neutral-900" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor">
-                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  <svg
+                    className="mt-0.5 h-6 w-6 shrink-0 text-neutral-900"
+                    fill="none"
+                    viewBox="0 0 24 24"
+                    strokeWidth="2.5"
+                    stroke="currentColor"
+                  >
+                    <path
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"
+                    />
                   </svg>
                   <div>
-                    <h3 className="text-sm font-black uppercase tracking-wide text-neutral-900">HEIC Images Detected</h3>
+                    <h3 className="text-sm font-black uppercase tracking-wide text-neutral-900">
+                      HEIC Images Detected
+                    </h3>
                     <p className="mt-1 text-sm font-medium text-neutral-800">
-                      Operations on Apple HEIC images can be slower. Processing them locally means:
+                      Operations on Apple HEIC images can be slower. Processing
+                      them locally means:
                     </p>
                     <ul className="mt-2 list-disc pl-5 text-sm font-medium text-neutral-800 space-y-1">
                       <li>Preview generation will take slightly longer.</li>
-                      <li>Compression runs slower compared to standard JPG/PNG files.</li>
+                      <li>
+                        Compression runs slower compared to standard JPG/PNG
+                        files.
+                      </li>
                     </ul>
                   </div>
                 </div>
+              </div>
+            )}
+
+            {notice && (
+              <div
+                role="status"
+                aria-live="polite"
+                className="mb-6 rounded-none border-[3px] border-neutral-900 bg-[#FFE600] p-4 text-left shadow-[4px_4px_0_rgba(17,17,17,1)]"
+              >
+                <p className="text-xs font-bold uppercase tracking-wide text-neutral-900">
+                  {notice}
+                </p>
               </div>
             )}
 
@@ -700,21 +971,29 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           <section data-reveal className="ps-reveal">
             <StepLabel n={2}>Choose your settings</StepLabel>
             <CompressionControls
-              width={width} setWidth={setWidth}
-              quality={quality} setQuality={setQuality}
-              format={format} setFormat={setFormat}
+              width={width}
+              setWidth={setWidth}
+              quality={quality}
+              setQuality={setQuality}
+              format={format}
+              setFormat={setFormat}
               imagekitAvailable={imagekitAvailable}
-              engine={activeEngine} setEngine={setEngine}
-              maxKB={maxKB} setMaxKB={setMaxKB}
-              keepIfLarger={keepIfLarger} setKeepIfLarger={setKeepIfLarger}
+              engine={activeEngine}
+              setEngine={setEngine}
+              maxKB={maxKB}
+              setMaxKB={setMaxKB}
+              keepIfLarger={keepIfLarger}
+              setKeepIfLarger={setKeepIfLarger}
             />
           </section>
 
           <section data-reveal className="ps-reveal">
             <StepLabel n={3}>Compress and download</StepLabel>
             <div className="flex flex-col items-stretch gap-6">
-              
-              <div ref={buttonWrapRef} className="w-full sm:w-auto sm:self-start">
+              <div
+                ref={buttonWrapRef}
+                className="w-full sm:w-auto sm:self-start"
+              >
                 <button
                   ref={buttonRef}
                   onClick={processImages}
@@ -725,16 +1004,37 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                       : "cursor-pointer bg-[var(--accent)] text-neutral-900 neo-shadow"
                   }`}
                 >
-                  <span>{isProcessing ? "Processing Batch..." : "Compress & Download Zip"}</span>
+                  <span>
+                    {isProcessing
+                      ? "Processing Batch..."
+                      : "Compress & Download Zip"}
+                  </span>
                   {!isProcessing && files.length > 0 && (
                     <span className="rounded-full bg-neutral-900 px-2.5 py-1 font-mono text-[11px] leading-none text-white">
                       {files.length}
                     </span>
                   )}
                   {isProcessing ? (
-                    <svg className="h-4 w-4 animate-spin" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-                      <circle cx="12" cy="12" r="9" stroke="currentColor" strokeOpacity="0.25" strokeWidth="3" />
-                      <path d="M21 12a9 9 0 0 0-9-9" stroke="currentColor" strokeWidth="3" strokeLinecap="round" />
+                    <svg
+                      className="h-4 w-4 animate-spin"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      aria-hidden="true"
+                    >
+                      <circle
+                        cx="12"
+                        cy="12"
+                        r="9"
+                        stroke="currentColor"
+                        strokeOpacity="0.25"
+                        strokeWidth="3"
+                      />
+                      <path
+                        d="M21 12a9 9 0 0 0-9-9"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                      />
                     </svg>
                   ) : (
                     <svg
@@ -762,24 +1062,48 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                 >
                   <div className="flex items-start gap-3">
                     <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-none border-2 border-neutral-900 bg-[var(--accent)] text-neutral-900">
-                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                      <svg
+                        className="h-4 w-4"
+                        viewBox="0 0 24 24"
+                        fill="none"
+                        stroke="currentColor"
+                        strokeWidth="3"
+                        strokeLinecap="round"
+                        strokeLinejoin="round"
+                        aria-hidden="true"
+                      >
                         <path d="M5 12.5l4.5 4.5L19 7.5" />
                       </svg>
                     </span>
                     <div>
-                      <h3 className="text-sm font-black uppercase tracking-wide text-neutral-900 md:text-base">Compression Complete</h3>
-                      <p className="mt-1 text-xs font-medium text-neutral-500 md:text-sm">Your zip file has been downloaded.</p>
+                      <h3 className="text-sm font-black uppercase tracking-wide text-neutral-900 md:text-base">
+                        Compression Complete
+                      </h3>
+                      <p className="mt-1 text-xs font-medium text-neutral-500 md:text-sm">
+                        {downloads.length > 1
+                          ? `Your images are ready in ${downloads.length} zip files.`
+                          : "Your zip is ready."}
+                      </p>
                     </div>
                   </div>
 
                   <div className="mt-8 flex items-end justify-between gap-4">
                     <div>
-                      <p className="text-xs font-bold uppercase tracking-widest text-neutral-400">Original</p>
-                      <p className="font-mono text-sm font-medium text-neutral-400 line-through">{formatBytes(originalSize)}</p>
+                      <p className="text-xs font-bold uppercase tracking-widest text-neutral-400">
+                        Original
+                      </p>
+                      <p className="font-mono text-sm font-medium text-neutral-400 line-through">
+                        {formatBytes(originalSize)}
+                      </p>
                     </div>
                     <div className="text-right">
-                      <p className="text-xs font-bold uppercase tracking-widest text-neutral-900">New Size</p>
-                      <p ref={newSizeRef} className="font-mono text-3xl font-black tracking-tight text-neutral-900 md:text-4xl">
+                      <p className="text-xs font-bold uppercase tracking-widest text-neutral-900">
+                        New Size
+                      </p>
+                      <p
+                        ref={newSizeRef}
+                        className="font-mono text-3xl font-black tracking-tight text-neutral-900 md:text-4xl"
+                      >
                         {formatBytes(compressedSize)}
                       </p>
                     </div>
@@ -794,44 +1118,92 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
                   <p className="mt-4 text-sm font-medium text-neutral-500">
                     <span className="font-black text-neutral-900">
-                      {percentSaved >= 0 ? "Saved" : "Larger by"} <span ref={savedRef}>{Math.abs(percentSaved)}</span>%
+                      {percentSaved >= 0 ? "Saved" : "Larger by"}{" "}
+                      <span ref={savedRef}>{Math.abs(percentSaved)}</span>%
                     </span>
                     {percentSaved >= 0 && " of total size"}
                   </p>
 
                   {breakdown && (
-                    <p className="mt-5 border-t-2 border-neutral-100 pt-4 font-mono text-[11px] font-bold uppercase tracking-wider text-neutral-400">{breakdown}</p>
+                    <p className="mt-5 border-t-2 border-neutral-100 pt-4 font-mono text-[11px] font-bold uppercase tracking-wider text-neutral-400">
+                      {breakdown}
+                    </p>
                   )}
 
                   {downloads.length > 0 && (
-                    <p className="mt-4 flex flex-wrap gap-x-3 gap-y-1 text-xs font-medium text-neutral-500">
-                      <span>Download didn&apos;t start?</span>
-                      {downloads.map((d) => (
-                        <a
-                          key={d.name}
-                          href={d.url}
-                          download={d.name}
-                          className="font-bold text-neutral-900 underline decoration-2 underline-offset-4 transition-colors hover:text-[var(--accent)]"
-                        >
-                          {d.name}
-                        </a>
-                      ))}
-                    </p>
+                    <div className="mt-5 border-t-2 border-neutral-100 pt-5">
+                      <p className="text-xs font-medium text-neutral-500">
+                        The download should start on its own. If it didn&apos;t,
+                        use the {downloads.length > 1 ? "buttons" : "button"}{" "}
+                        below.
+                      </p>
+                      <div className="mt-3 flex flex-col gap-3">
+                        {downloads.map((d) => (
+                          <div key={d.name} className="flex gap-2">
+                            <a
+                              href={d.url}
+                              download={d.name}
+                              className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-none border-[3px] border-neutral-900 bg-[var(--accent)] px-4 py-3 text-xs font-black uppercase tracking-wider text-neutral-900 shadow-[3px_3px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[5px_5px_0_rgba(17,17,17,1)] active:translate-x-0 active:translate-y-0 active:shadow-none focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30"
+                            >
+                              <span className="truncate">{d.name}</span>
+                              <span className="shrink-0 font-mono text-[11px]">
+                                {formatBytes(d.size)}
+                              </span>
+                            </a>
+                            {canShareZip && (
+                              <button
+                                type="button"
+                                onClick={() => shareZip(d)}
+                                className="shrink-0 cursor-pointer rounded-none border-[3px] border-neutral-900 bg-white px-4 py-3 text-xs font-black uppercase tracking-wider text-neutral-900 shadow-[3px_3px_0_rgba(17,17,17,1)] transition-transform active:translate-x-0 active:translate-y-0 active:shadow-none focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30"
+                              >
+                                Share
+                              </button>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    </div>
                   )}
 
                   {runInfo.stopped > 0 && (
                     <p className="mt-3 text-xs font-medium text-amber-600">
-                      Stopped early. {runInfo.stopped} image{runInfo.stopped === 1 ? "" : "s"} left in the queue.
+                      Stopped early. {runInfo.stopped} image
+                      {runInfo.stopped === 1 ? "" : "s"} left in the queue.
                     </p>
                   )}
                   {runInfo.failed.length > 0 && (
                     <p className="mt-3 text-xs font-medium text-red-600">
-                      {runInfo.failed.length} failed and stayed in the queue so you can retry:{" "}
-                      {runInfo.failed.slice(0, 3).map((f) => f.name).join(", ")}
-                      {runInfo.failed.length > 3 ? ` and ${runInfo.failed.length - 3} more` : ""}.
-                      {" "}First error: {runInfo.failed[0].reason}
+                      {runInfo.failed.length} failed and stayed in the queue so
+                      you can retry:{" "}
+                      {runInfo.failed
+                        .slice(0, 3)
+                        .map((f) => f.name)
+                        .join(", ")}
+                      {runInfo.failed.length > 3
+                        ? ` and ${runInfo.failed.length - 3} more`
+                        : ""}
+                      . First error: {runInfo.failed[0].reason}
                     </p>
                   )}
+                </div>
+              )}
+
+              {resultsCancelled && (
+                <div
+                  ref={errorRef}
+                  role="status"
+                  aria-live="polite"
+                  className="w-full rounded-none border-[3px] border-neutral-900 bg-white p-5 text-left opacity-0 shadow-[6px_6px_0_rgba(17,17,17,1)] md:max-w-2xl md:p-6"
+                >
+                  <h3 className="text-sm font-black uppercase tracking-wide text-neutral-900 md:text-base">
+                    Cancelled
+                  </h3>
+                  <p className="mt-2 text-xs font-medium text-neutral-500 md:text-sm">
+                    No images were finished, and all of them are still in the
+                    queue.
+                    {runInfo.failed.length > 0 &&
+                      ` ${runInfo.failed.length} failed before you cancelled. First error: ${runInfo.failed[0].reason}`}
+                  </p>
                 </div>
               )}
 
@@ -841,13 +1213,15 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                   role="alert"
                   className="w-full rounded-none border-[3px] border-neutral-900 bg-red-50 p-5 text-left opacity-0 shadow-[6px_6px_0_rgba(17,17,17,1)] md:max-w-2xl md:p-6"
                 >
-                  <h3 className="text-sm font-black uppercase tracking-wide text-red-600 md:text-base">Nothing could be compressed</h3>
+                  <h3 className="text-sm font-black uppercase tracking-wide text-red-600 md:text-base">
+                    Nothing could be compressed
+                  </h3>
                   <p className="mt-2 text-xs font-medium text-red-600 md:text-sm">
                     {runInfo.failed.length > 0
                       ? runInfo.failed[0].reason
                       : activeEngine === "imagekit"
-                      ? "ImageKit rejected every file. If your monthly quota is used up, switch the engine to Local or Auto and try again."
-                      : "Nothing was processed."}
+                        ? "ImageKit rejected every file. If your monthly quota is used up, switch the engine to Local or Auto and try again."
+                        : "Nothing was processed."}
                   </p>
                 </div>
               )}

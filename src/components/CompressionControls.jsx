@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useId, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import gsap from "gsap";
 import { canEncodeLocally } from "@/lib/localCompress";
 
@@ -18,18 +18,25 @@ const FORMATS = [
   ["png", "PNG"],
 ];
 
+// Order we try when the chosen format can't be encoded. JPG/PNG are always supported.
+const FALLBACK_ORDER = ["webp", "jpg", "png"];
+
 const ENGINES = [
-  { id: "imagekit", label: "ImageKit", hint: "Processed in the cloud by ImageKit. Uses your free monthly quota." },
   { id: "local", label: "Local", hint: "Processed in your browser. Unlimited, private, and nothing is uploaded." },
+  { id: "imagekit", label: "ImageKit", hint: "Processed in the cloud by ImageKit. Uses your free monthly quota." },
   { id: "auto", label: "Auto", hint: "Tries ImageKit first and switches to local if it fails or the quota runs out." },
 ];
+
+const WIDTH_MIN = 100;
+const WIDTH_MAX = 3840;
+const MAXKB_MIN = 10;
 
 const prefersReducedMotion = () =>
   typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
 const labelCls = "text-xs font-black uppercase tracking-widest text-neutral-900";
 
-// UPGRADED: Brutalist sliders with thick borders and blocky thumbs
+// Brutalist sliders with thick borders and blocky thumbs
 const CSS = `
 .cc-range {-webkit-appearance:none; appearance:none; width:100%; height:32px; background:transparent; cursor:pointer; outline:none; margin:0}
 .cc-range::-webkit-slider-runnable-track {height:12px; background:linear-gradient(to right, #111 var(--p,0%), #e5e5e5 var(--p,0%)); border:3px solid #111;}
@@ -44,11 +51,15 @@ const CSS = `
 .cc-range:active::-moz-range-thumb {background: #111;}
 .cc-range:focus-visible::-moz-range-thumb {background: var(--accent); box-shadow: 0 0 0 2px #fff, 0 0 0 5px #111;}
 
+.cc-range:disabled {cursor:not-allowed; opacity:.35}
+.cc-range:disabled:hover::-webkit-slider-thumb {background:#fff}
+.cc-range:disabled:hover::-moz-range-thumb {background:#fff}
+
 .cc-num {-moz-appearance:textfield; appearance:textfield}
 .cc-num::-webkit-outer-spin-button, .cc-num::-webkit-inner-spin-button {-webkit-appearance:none; margin:0}
 `;
 
-// UPGRADED: A rigid, hard-bordered grid instead of a sliding pill
+// A rigid, hard-bordered grid instead of a sliding pill
 function Segmented({ options, value, onChange, label, fullWidth = false }) {
   return (
     <div
@@ -98,6 +109,14 @@ export default function CompressionControls({
   keepIfLarger, setKeepIfLarger,
 }) {
   const [localSupport, setLocalSupport] = useState({});
+  const uid = useId();
+  const hintRef = useRef(null);
+
+  const hasTarget = Number(maxKB) > 0;
+  // The local engine is used when it's selected, and also whenever a Max Limit is set
+  // (the cloud engine can't target a file size), so format support matters in both cases.
+  const needsLocal = engine === "local" || hasTarget;
+  const isPng = format === "png";
 
   useEffect(() => {
     let cancelled = false;
@@ -109,30 +128,44 @@ export default function CompressionControls({
     return () => { cancelled = true; };
   }, []);
 
-  useEffect(() => {
-    if (engine === "local" && localSupport[format] === false) setFormat("webp");
-  }, [engine, localSupport, format, setFormat]);
+  // Returns `f` if usable, otherwise the first supported alternative (never `f` itself).
+  const resolveFormat = useCallback(
+    (f) => {
+      if (!needsLocal || localSupport[f] !== false) return f;
+      return FALLBACK_ORDER.find((c) => c !== f && localSupport[c] !== false) || "jpg";
+    },
+    [needsLocal, localSupport]
+  );
 
-  const handleWidthBlur = () => {
-    if (width < 100) setWidth(100);
-    if (width > 3840) setWidth(3840);
+  useEffect(() => {
+    const next = resolveFormat(format);
+    if (next !== format) setFormat(next);
+  }, [format, resolveFormat, setFormat]);
+
+  const clampWidth = () => {
+    const n = Number(width);
+    if (!Number.isFinite(n) || n < WIDTH_MIN) setWidth(WIDTH_MIN);
+    else if (n > WIDTH_MAX) setWidth(WIDTH_MAX);
+  };
+
+  const clampMaxKB = () => {
+    if (maxKB === "") return;
+    const n = Number(maxKB);
+    if (!Number.isFinite(n) || n <= 0) setMaxKB("");
+    else if (n < MAXKB_MIN) setMaxKB(String(MAXKB_MIN));
   };
 
   const applyPreset = (w, q, f) => {
     setWidth(w);
     setQuality(q);
-    setFormat(f);
+    setFormat(resolveFormat(f));
   };
 
-  const hasTarget = Number(maxKB) > 0;
-  const uid = useId();
-  const hintRef = useRef(null);
-
-  const widthPct = Math.min(100, Math.max(0, (((Number(width) || 100) - 100) / (3840 - 100)) * 100));
+  const widthPct = Math.min(100, Math.max(0, (((Number(width) || WIDTH_MIN) - WIDTH_MIN) / (WIDTH_MAX - WIDTH_MIN)) * 100));
   const qualityPct = Math.min(100, Math.max(0, ((Number(quality) - 1) / 99) * 100));
 
   const formatOptions = FORMATS.map(([value, label]) => {
-    const blocked = engine === "local" && localSupport[value] === false;
+    const blocked = needsLocal && localSupport[value] === false;
     return {
       value,
       label: label.replace(/\s*\(.*\)$/, ""),
@@ -140,7 +173,7 @@ export default function CompressionControls({
       title: blocked ? `${label} (not supported by this browser)` : undefined,
     };
   });
-  
+
   const formatNote = FORMATS.find(([v]) => v === format)?.[1].match(/\((.*)\)/)?.[1];
   const engineOptions = ENGINES.map((e) => ({ value: e.id, label: e.label }));
 
@@ -166,7 +199,8 @@ export default function CompressionControls({
         <span className={`${labelCls} sm:w-32 sm:shrink-0`}>Quick Presets</span>
         <div className="flex flex-wrap gap-2.5">
           {PRESETS.map((p) => {
-            const active = width === p.w && quality === p.q && format === p.f;
+            // Compare against the format this preset would actually apply on this browser.
+            const active = width === p.w && quality === p.q && format === resolveFormat(p.f);
             return (
               <button
                 key={p.label}
@@ -199,7 +233,7 @@ export default function CompressionControls({
 
       {/* Main Settings Bento Box */}
       <div className="mb-6 grid grid-cols-1 gap-7 rounded-none border-[3px] border-neutral-900 bg-white p-6 shadow-[6px_6px_0_rgba(17,17,17,1)] md:grid-cols-3 md:gap-8 md:p-8">
-        
+
         <div className="flex flex-col justify-between">
           <div className="mb-4 flex h-8 items-center justify-between">
             <label htmlFor={`${uid}-width`} className={labelCls}>Width</label>
@@ -207,11 +241,11 @@ export default function CompressionControls({
               <input
                 id={`${uid}-width`}
                 type="number"
-                min="100"
-                max="3840"
+                min={WIDTH_MIN}
+                max={WIDTH_MAX}
                 value={width}
                 onChange={(e) => setWidth(e.target.value === "" ? "" : Number(e.target.value))}
-                onBlur={handleWidthBlur}
+                onBlur={clampWidth}
                 className="cc-num h-8 w-[4.5rem] rounded-none border-[2px] border-neutral-900 bg-neutral-100 px-2 text-right font-mono text-sm font-bold text-neutral-900 outline-none transition-colors focus:border-[var(--accent)] focus:bg-white"
               />
               <span className="font-mono text-xs font-bold text-neutral-400">PX</span>
@@ -221,9 +255,9 @@ export default function CompressionControls({
             <input
               type="range"
               aria-label="Target width"
-              min="100"
-              max="3840"
-              value={width || 100}
+              min={WIDTH_MIN}
+              max={WIDTH_MAX}
+              value={width || WIDTH_MIN}
               onChange={(e) => setWidth(Number(e.target.value))}
               style={{ "--p": `${widthPct}%` }}
               className="cc-range"
@@ -234,7 +268,9 @@ export default function CompressionControls({
         <div className="flex flex-col justify-between">
           <div className="mb-4 flex h-8 items-center justify-between">
             <label htmlFor={`${uid}-quality`} className={labelCls}>Quality</label>
-            <span className="font-mono text-xl font-black text-neutral-900">{quality}</span>
+            <span className={`font-mono text-xl font-black ${isPng ? "text-neutral-300" : "text-neutral-900"}`}>
+              {isPng ? "LOSSLESS" : quality}
+            </span>
           </div>
           <div className="flex h-10 items-center">
             <input
@@ -243,6 +279,7 @@ export default function CompressionControls({
               min="1"
               max="100"
               value={quality}
+              disabled={isPng}
               onChange={(e) => setQuality(Number(e.target.value))}
               style={{ "--p": `${qualityPct}%` }}
               className="cc-range"
@@ -271,10 +308,11 @@ export default function CompressionControls({
             <span className="flex h-10 items-center rounded-none border-[3px] border-neutral-900 bg-white pr-3 shadow-[2px_2px_0_rgba(17,17,17,1)] transition-colors focus-within:border-[var(--accent)]">
               <input
                 type="number"
-                min="10"
+                min={MAXKB_MIN}
                 placeholder="OFF"
                 value={maxKB}
                 onChange={(e) => setMaxKB(e.target.value)}
+                onBlur={clampMaxKB}
                 className="cc-num h-full w-16 bg-transparent px-3 text-right font-mono text-sm font-bold text-neutral-900 outline-none placeholder:font-normal placeholder:text-neutral-400"
               />
               <span className="font-mono text-xs font-bold text-neutral-400">KB</span>
@@ -291,11 +329,11 @@ export default function CompressionControls({
               />
               {/* Hard brutalist square toggle box */}
               <div className="h-6 w-6 rounded-none border-[3px] border-neutral-900 bg-white transition-colors duration-200 peer-checked:bg-[var(--accent)] peer-focus-visible:ring-4 peer-focus-visible:ring-neutral-900/30" />
-              <svg 
-                className={`absolute inset-0 h-6 w-6 pointer-events-none stroke-neutral-900 stroke-[3px] transition-transform duration-200 ${keepIfLarger ? "scale-100" : "scale-0"}`} 
-                fill="none" 
-                viewBox="0 0 24 24" 
-                strokeLinecap="square" 
+              <svg
+                className={`absolute inset-0 h-6 w-6 pointer-events-none stroke-neutral-900 stroke-[3px] transition-transform duration-200 ${keepIfLarger ? "scale-100" : "scale-0"}`}
+                fill="none"
+                viewBox="0 0 24 24"
+                strokeLinecap="square"
                 strokeLinejoin="miter"
               >
                 <path d="M5 13l4 4L19 7" />
@@ -307,7 +345,7 @@ export default function CompressionControls({
 
         {hasTarget && (
           <p ref={hintRef} className="mt-4 font-mono text-[11px] font-bold uppercase tracking-wider text-neutral-500">
-            {format === "png"
+            {isPng
               ? "PNG is lossless, so a max file size has no effect on it."
               : imagekitAvailable
               ? "Max file size runs locally and uses the quality slider as an upper limit."
