@@ -42,10 +42,17 @@ const makeNameRegistry = () => {
 
 const PART_LIMIT = 250 * 1024 * 1024;
 
+// Mobile-safe concurrency: phones process 1 image at a time to prevent RAM crashes
 const getConcurrency = () => {
+  if (typeof window === "undefined") return 1;
+  const isMobile =
+    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
+    (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
+  if (isMobile) return 1;
+
   const cores = navigator.hardwareConcurrency || 4;
-  const memory = navigator.deviceMemory || 8;
-  return Math.max(1, Math.min(4, Math.floor(cores / 2), memory <= 4 ? 2 : 4));
+  const memory = typeof navigator.deviceMemory === "number" ? navigator.deviceMemory : 4;
+  return Math.max(1, Math.min(3, Math.floor(cores / 2), memory <= 4 ? 2 : 3));
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -281,6 +288,8 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           completedCount++;
           setDoneCount(completedCount);
           setProgress((completedCount / queue.length) * 100);
+          // Micro-yield: gives mobile WebKit/Chrome time to garbage-collect canvases
+          await sleep(60);
         }
       };
 
@@ -560,19 +569,15 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             aria-label="PixShrink, back to top"
             className="inline-flex items-center gap-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/30 focus-visible:ring-offset-4 focus-visible:ring-offset-white"
           >
-
             {/* <PixelMosaic size={28} grid={4} animated={markActive} /> */}
-
+            
             <svg 
               className="h-[1.85rem] w-[1.85rem] shrink-0 overflow-visible" 
               viewBox="0 0 100 100" 
               xmlns="http://www.w3.org/2000/svg"
               aria-hidden="true"
             >
-              {/* Static Background Shadow */}
               <rect x="25" y="25" width="70" height="70" fill="#111111" />
-              
-              {/* Moving Logo Block */}
               <g className={`transition-transform duration-200 ease-out ${markActive ? "-translate-y-2.5 translate-x-1.5" : ""}`}>
                 <rect x="5" y="5" width="70" height="70" fill="#ffffff" stroke="#111111" strokeWidth="6" strokeLinejoin="miter" />
                 <rect x="15" y="15" width="22" height="22" fill="#111111" />
