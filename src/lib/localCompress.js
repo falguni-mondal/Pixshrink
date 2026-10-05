@@ -1,6 +1,6 @@
-// Public API for local compression. Uses a Web Worker when the browser supports
+// Public API for local processing. Uses a Web Worker when the browser supports
 // Worker + OffscreenCanvas, and quietly falls back to the main thread otherwise.
-import { canEncode, compressImage } from "./encodeCore";
+import { canEncode, compressImage, renderThumbnail } from "./encodeCore";
 
 export const canEncodeLocally = canEncode;
 
@@ -26,7 +26,7 @@ function getWorker() {
       const task = pending.get(data.id);
       if (!task) return;
       pending.delete(data.id);
-      if (data.ok) task.resolve({ blob: data.blob, format: data.format });
+      if (data.ok) task.resolve(data.result);
       else task.reject(new Error(data.error));
     };
 
@@ -46,21 +46,35 @@ function getWorker() {
   return worker;
 }
 
-/**
- * @returns {Promise<{ blob: Blob, format: string }>}
- */
-export async function compressLocally(file, opts) {
+// Returns a promise, or null when no worker is available.
+function runInWorker(type, payload) {
   const w = getWorker();
-  if (!w) return compressImage(file, opts);
+  if (!w) return null;
+  return new Promise((resolve, reject) => {
+    const id = nextId++;
+    pending.set(id, { resolve, reject });
+    w.postMessage({ id, type, ...payload });
+  });
+}
 
+/** @returns {Promise<{ blob: Blob, format: string }>} */
+export async function compressLocally(file, opts) {
   try {
-    return await new Promise((resolve, reject) => {
-      const id = nextId++;
-      pending.set(id, { resolve, reject });
-      w.postMessage({ id, file, opts });
-    });
+    const job = runInWorker("compress", { file, opts });
+    if (job) return await job;
   } catch (error) {
-    if (error.message === "WORKER_FAILED") return compressImage(file, opts);
-    throw error;
+    if (error.message !== "WORKER_FAILED") throw error;
   }
+  return compressImage(file, opts);
+}
+
+/** @returns {Promise<Blob>} a small square WebP preview */
+export async function thumbnailLocally(file, size = 160) {
+  try {
+    const job = runInWorker("thumb", { file, size });
+    if (job) return await job;
+  } catch (error) {
+    if (error.message !== "WORKER_FAILED") throw error;
+  }
+  return renderThumbnail(file, size);
 }

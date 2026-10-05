@@ -2,6 +2,9 @@
 // page smooth) or on the main thread as a fallback. It only touches the DOM in the
 // fallback branch of makeCanvas().
 
+import { isHeicFile } from "./fileTypes";
+import { decodeHeicToBitmap } from "./heicDecode";
+
 export const MIME = {
   webp: "image/webp",
   avif: "image/avif",
@@ -66,12 +69,7 @@ export async function compressImage(
   }
   const mime = MIME[outFormat];
 
-  let bitmap;
-  try {
-    bitmap = await createImageBitmap(file);
-  } catch {
-    throw new Error(`This browser can't read "${file.name}" (${file.type || "unknown type"})`);
-  }
+  const bitmap = await decodeBitmap(file);
 
   try {
     // Never upscale: a 500px image with a 1080px target stays 500px.
@@ -114,6 +112,53 @@ export async function compressImage(
     // If even the lowest quality is too big, return that best-effort result.
     blob = best ?? (await canvasToBlob(canvas, mime, 0.05));
     return { blob, format: outFormat };
+  } finally {
+    bitmap.close?.();
+  }
+}
+
+/**
+ * Decodes any supported image into an ImageBitmap.
+ * 1) The browser's own decoder (fast; Safari/iOS handle HEIC natively here).
+ * 2) For HEIC files the browser can't read (Chrome, Edge, Firefox), the libheif WASM decoder.
+ */
+export async function decodeBitmap(file, options) {
+  try {
+    return await createImageBitmap(file, options);
+  } catch {
+    // Some browsers reject the resize options; retry without them.
+    if (options) {
+      try {
+        return await createImageBitmap(file);
+      } catch {}
+    }
+    if (isHeicFile(file)) {
+      try {
+        return await decodeHeicToBitmap(file);
+      } catch (heicError) {
+        throw new Error(`Couldn't decode "${file.name}" (${heicError.message})`);
+      }
+    }
+    throw new Error(`This browser can't read "${file.name}" (${file.type || "unknown type"})`);
+  }
+}
+
+/** Small center-cropped square preview as a WebP blob. */
+export async function renderThumbnail(file, size = 160) {
+  const bitmap = await decodeBitmap(file, { resizeWidth: size * 3, resizeQuality: "medium" });
+  try {
+    const side = Math.min(bitmap.width, bitmap.height);
+    const sx = (bitmap.width - side) / 2;
+    const sy = (bitmap.height - side) / 2;
+
+    const canvas = makeCanvas(size, size);
+    const ctx = canvas.getContext("2d");
+    ctx.imageSmoothingQuality = "high";
+    ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, size, size);
+
+    const blob = await canvasToBlob(canvas, "image/webp", 0.7);
+    if (!blob) throw new Error("Could not create thumbnail");
+    return blob;
   } finally {
     bitmap.close?.();
   }

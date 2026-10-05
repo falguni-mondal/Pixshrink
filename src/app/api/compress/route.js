@@ -8,9 +8,9 @@ async function getImageKit() {
   if (!client) {
     const { default: ImageKit } = await import("imagekit");
     client = new ImageKit({
-      publicKey: process.env.NEXT_IMAGEKIT_PUBLIC_KEY,
+      publicKey: process.env.IMAGEKIT_PUBLIC_KEY,
       privateKey: process.env.IMAGEKIT_PRIVATE_KEY,
-      urlEndpoint: process.env.NEXT_IMAGEKIT_URL_ENDPOINT,
+      urlEndpoint: process.env.IMAGEKIT_URL_ENDPOINT,
     });
   }
   return client;

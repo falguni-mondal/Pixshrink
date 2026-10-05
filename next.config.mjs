@@ -2,6 +2,7 @@
 const nextConfig = {
   /* config options here */
   reactCompiler: true,
+  allowedDevOrigins: ['192.168.31.148'],
 };
 
 export default nextConfig;
