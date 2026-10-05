@@ -1,26 +1,68 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  --background: #fdfcfb;
+  --foreground: #111111;
+  --accent: #FF5500; /* Safety Orange */
 }
 
 @theme inline {
   --color-background: var(--background);
   --color-foreground: var(--foreground);
+  --color-accent: var(--accent);
+  
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
+  
+  /* Make the pixel font available to Tailwind's font- utility */
+  --font-pixel: var(--font-pixel);
+
+  /* Marquee animation */
+  --animate-marquee: marquee 30s linear infinite;
+}
+
+@keyframes marquee {
+  0% { transform: translateX(0%); }
+  100% { transform: translateX(-50%); }
 }
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+    /* If you want to support dark mode later, adjust these. 
+       For now, we keep the brutalist vibe locked to light mode */
+    --background: #fdfcfb;
+    --foreground: #111111;
   }
 }
 
 body {
-  /* background: var(--background); */
   color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background-color: var(--background);
+  
+  /* The Dot Matrix Texture */
+  background-image: radial-gradient(#d4d4d4 1.25px, transparent 1.25px);
+  background-size: 22px 22px;
+  background-position: 0 0;
+}
+
+/* Neobrutalist Hard Shadow Utility */
+.neo-shadow {
+  box-shadow: 5px 5px 0px 0px rgba(17, 17, 17, 1);
+  transition: all 0.15s ease-out;
+}
+
+.neo-shadow:active {
+  box-shadow: 0px 0px 0px 0px rgba(17, 17, 17, 1);
+  transform: translate(5px, 5px);
+}
+
+/* Disable the shadow flattening for users who prefer reduced motion */
+@media (prefers-reduced-motion: reduce) {
+  .neo-shadow {
+    transition: none;
+  }
+  .neo-shadow:active {
+    box-shadow: 5px 5px 0px 0px rgba(17, 17, 17, 1);
+    transform: none;
+  }
 }

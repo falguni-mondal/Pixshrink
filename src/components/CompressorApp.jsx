@@ -23,11 +23,9 @@ const stripExt = (name) => {
   return i > 0 ? name.slice(0, i) : name;
 };
 
-// Exact byte size of a base64 string (accounts for "=" padding)
 const base64Size = (b64) =>
   Math.floor((b64.length * 3) / 4) - (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
 
-// Prevents two files with the same name from overwriting each other inside the zip
 const makeNameRegistry = () => {
   const used = new Set();
   return (name) => {
@@ -42,20 +40,16 @@ const makeNameRegistry = () => {
   };
 };
 
-// Start a new zip after ~250 MB of output so memory stays bounded on very large batches
 const PART_LIMIT = 250 * 1024 * 1024;
 
-// How many images to process at once. Fewer on weaker devices to avoid running out of memory.
 const getConcurrency = () => {
   const cores = navigator.hardwareConcurrency || 4;
-  const memory = navigator.deviceMemory || 8; // Chromium only; assume enough elsewhere
+  const memory = navigator.deviceMemory || 8;
   return Math.max(1, Math.min(4, Math.floor(cores / 2), memory <= 4 ? 2 : 4));
 };
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
-// crypto.randomUUID only exists on HTTPS or localhost. Opening the dev server from a phone
-// over http://192.168.x.x is an insecure origin, so it needs a fallback.
 let idCounter = 0;
 const makeId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
@@ -68,8 +62,6 @@ const makeId = () =>
 const prefersReducedMotion = () =>
   typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-// Small scoped sheet: hero reveal masks, a pixel-style blink for the status square, and a
-// failsafe that reveals everything after 3.5s even if JavaScript is slow or blocked.
 const PAGE_CSS = `
 .ps-reveal,.ps-word{opacity:0;animation:ps-failsafe 0s linear 3.5s forwards}
 .ps-word{display:inline-block;will-change:transform}
@@ -83,7 +75,6 @@ const PAGE_CSS = `
 }
 `;
 
-// Splits a sentence into words that rise out of a mask, one after another
 function Words({ text }) {
   const words = text.split(" ");
   return words.map((word, i) => (
@@ -96,37 +87,36 @@ function Words({ text }) {
   ));
 }
 
-// The steps really are a sequence (add, adjust, export), so they stay numbered
+// UPGRADED: Massive pixel-font background numbers for the brutalist editorial feel
 function StepLabel({ n, children }) {
   return (
-    <div className="mb-4 flex items-center gap-3 sm:mb-5">
+    <div className="relative mb-6 flex items-center pt-4 sm:mb-8 sm:pt-6">
       <span
         aria-hidden="true"
-        className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md border border-neutral-300 font-[family-name:var(--font-pixel)] text-sm leading-none text-neutral-900"
+        className="absolute -left-2 -top-1 z-0 select-none font-[family-name:var(--font-pixel)] text-[5rem] leading-none text-neutral-900/5 sm:-left-4 sm:-top-2 sm:text-[7rem]"
       >
         {n}
       </span>
-      <h2 className="text-sm font-medium text-neutral-900 sm:text-base">{children}</h2>
-      <span aria-hidden="true" className="h-px flex-1 bg-neutral-200" />
+      <h2 className="relative z-10 text-xl font-black uppercase tracking-tight text-neutral-900 sm:text-2xl">
+        {children}
+      </h2>
     </div>
   );
 }
 
 export default function CompressorApp({ imagekitAvailable = false }) {
-  // State is an array of objects: { id: string, file: File }
   const [files, setFiles] = useState([]);
   const [width, setWidth] = useState(1080);
   const [quality, setQuality] = useState(80);
   const [format, setFormat] = useState("webp");
 
-  // engine = "imagekit" | "local" | "auto". Without ImageKit configured it is always "local".
   const [engine, setEngine] = useState(imagekitAvailable ? "imagekit" : "local");
   const activeEngine = imagekitAvailable ? engine : "local";
   const [maxKB, setMaxKB] = useState("");
   const [keepIfLarger, setKeepIfLarger] = useState(false);
 
   const [isProcessing, setIsProcessing] = useState(false);
-  const [stage, setStage] = useState("compress"); // "compress" | "zip"
+  const [stage, setStage] = useState("compress");
   const [progress, setProgress] = useState(0);
   const [doneCount, setDoneCount] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
@@ -140,7 +130,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const cancelRef = useRef(false);
   const urlsRef = useRef([]);
 
-  // Refs used only by the GSAP animations
   const pageRef = useRef(null);
   const buttonWrapRef = useRef(null);
   const buttonRef = useRef(null);
@@ -150,7 +139,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const savedRef = useRef(null);
   const barRef = useRef(null);
 
-  // Stable callbacks so the memoized dropzone and previews don't re-render needlessly
   const handleFilesAdded = useCallback((newFilesArray) => {
     const filesWithIds = newFilesArray.map((file) => ({
       id: makeId(),
@@ -168,7 +156,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     setFiles([]);
   }, []);
 
-  // Warn before closing or refreshing the tab mid-run, since work would be lost
   useEffect(() => {
     if (!isProcessing) return;
     const warn = (e) => {
@@ -179,14 +166,13 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     return () => window.removeEventListener("beforeunload", warn);
   }, [isProcessing]);
 
-  // Release zip memory when leaving the page
   useEffect(() => {
     return () => urlsRef.current.forEach((u) => URL.revokeObjectURL(u));
   }, []);
 
   const processImages = async () => {
     if (files.length === 0) return;
-    const queue = files; // snapshot of this run
+    const queue = files;
 
     cancelRef.current = false;
     setStopping(false);
@@ -197,17 +183,14 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     setShowResults(false);
     setIsProcessing(true);
 
-    // Free the previous run's zips
     urlsRef.current.forEach((u) => URL.revokeObjectURL(u));
     urlsRef.current = [];
     setDownloads([]);
 
     try {
-      // Loaded on demand so it doesn't weigh down the first page load
       const { default: JSZip } = await import("jszip");
 
       const uniqueName = makeNameRegistry();
-      // A max file size is only meaningful for lossy formats, and it runs in the browser
       const targetKB = Number(maxKB) > 0 && format !== "png" ? Number(maxKB) : 0;
 
       const stats = { imagekit: 0, local: 0, kept: 0 };
@@ -217,8 +200,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       let okOriginalBytes = 0;
       let totalCompressedBytes = 0;
 
-      // Zips are finalized in parts of ~250 MB. "STORE" skips re-compression,
-      // since images are already compressed and DEFLATE would only burn CPU.
       let current = { zip: new JSZip(), bytes: 0 };
       const partJobs = [];
       const generate = (zip) => zip.generateAsync({ type: "blob", compression: "STORE" });
@@ -232,7 +213,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         }
       };
 
-      // ENGINE 1: ImageKit (your original request, unchanged)
       const viaImageKit = async (file) => {
         const formData = new FormData();
         formData.append("file", file);
@@ -253,7 +233,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         };
       };
 
-      // ENGINE 2: Local (runs in a Web Worker in your browser, no quota)
       const viaLocal = async (file, allowFallback) => {
         const { blob, format: usedFormat } = await compressLocally(file, {
           width, quality, format, maxKB: targetKB, allowFallback,
@@ -309,7 +288,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         }
       };
 
-      // A small pool of runners pulls the next file as soon as one finishes
       let cursor = 0;
       const runner = async () => {
         while (!cancelRef.current && cursor < queue.length) {
@@ -322,7 +300,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       const okCount = succeeded.size;
       const notAttempted = cancelRef.current ? queue.length - succeeded.size - failed.length : 0;
 
-      // Only successful files count toward the savings numbers
       setOriginalSize(okOriginalBytes);
       setCompressedSize(totalCompressedBytes);
       setRunInfo({ ok: okCount, ...stats, failed, stopped: notAttempted });
@@ -344,7 +321,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         urlsRef.current = ready.map((d) => d.url);
         setDownloads(ready);
 
-        // Browsers may ask permission for multiple downloads, so space them out a little
         for (let i = 0; i < ready.length; i++) {
           if (i > 0) await sleep(400);
           const a = document.createElement("a");
@@ -357,7 +333,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       }
 
       setShowResults(true);
-      // Finished files leave the queue; failed or skipped ones stay so you can retry them
       setFiles((prev) => prev.filter((f) => !succeeded.has(f.id)));
     } catch (error) {
       console.error("Batch failed:", error);
@@ -382,12 +357,21 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     runInfo.kept > 0 && `${runInfo.kept} kept as original`,
   ].filter(Boolean).join(" · ");
 
+  const hasHeic = files.some(
+    (f) =>
+      f.file.name.toLowerCase().endsWith(".heic") ||
+      f.file.name.toLowerCase().endsWith(".heif") ||
+      f.file.type === "image/heic" ||
+      f.file.type === "image/heif"
+  );
+
   // -------------------------------------------------------------------------------------
   // Design + GSAP (everything below only affects how the page looks and moves)
   // -------------------------------------------------------------------------------------
   const isDisabled = files.length === 0 || isProcessing;
   const resultsReady = showResults && !isProcessing && runInfo.ok > 0;
   const resultsFailed = showResults && !isProcessing && runInfo.ok === 0;
+  
   const engineLabel =
     activeEngine === "local"
       ? "Runs in your browser"
@@ -395,7 +379,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       ? "Cloud with local fallback"
       : "Cloud engine";
 
-  // The logo mark comes alive while the pointer or keyboard focus is on the wordmark
   const [markActive, setMarkActive] = useState(false);
 
   const scrollToTop = (e) => {
@@ -405,7 +388,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     else window.scrollTo({ top: 0, behavior: "smooth" });
   };
 
-  // One orchestrated page-load moment: header, status, headline words, then the tool
   useEffect(() => {
     const root = pageRef.current;
     if (!root) return;
@@ -433,7 +415,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     return () => mm.revert();
   }, []);
 
-  // Subtle magnetic pull on the main button (mouse devices only, never while disabled).
   useEffect(() => {
     const btn = buttonRef.current;
     const wrap = buttonWrapRef.current;
@@ -444,35 +425,29 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     const yTo = gsap.quickTo(btn, "y", { duration: 0.6, ease: "power3.out" });
 
     const onMove = (e) => {
-      const r = wrap.getBoundingClientRect(); // measured on the static wrapper, so no feedback loop
+      const r = wrap.getBoundingClientRect();
       xTo((e.clientX - (r.left + r.width / 2)) * 0.04);
       yTo((e.clientY - (r.top + r.height / 2)) * 0.12);
     };
-    const press = () => gsap.to(btn, { scale: 0.98, duration: 0.15, ease: "power2.out", overwrite: "auto" });
-    const release = () =>
-      gsap.to(btn, { scale: 1, duration: 0.5, ease: "elastic.out(1, 0.6)", overwrite: "auto" });
+    
+    // Brutalist buttons don't scale down, they translate into their shadows,
+    // which is handled purely by the :active state in CSS now. We just handle the magnetic float here.
     const leave = () => {
       xTo(0);
       yTo(0);
-      release();
     };
 
     btn.addEventListener("pointermove", onMove);
     btn.addEventListener("pointerleave", leave);
-    btn.addEventListener("pointerdown", press);
-    btn.addEventListener("pointerup", release);
 
     return () => {
       btn.removeEventListener("pointermove", onMove);
       btn.removeEventListener("pointerleave", leave);
-      btn.removeEventListener("pointerdown", press);
-      btn.removeEventListener("pointerup", release);
       gsap.killTweensOf(btn);
       gsap.set(btn, { clearProps: "transform" });
     };
   }, [isDisabled]);
 
-  // Results panel: slide in, count the new size down, fill the bar, bring it into view if needed.
   useEffect(() => {
     const root = resultsRef.current;
     if (!resultsReady || !root) return;
@@ -483,7 +458,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     const ratio = originalSize > 0 ? Math.min(1, Math.max(0, compressedSize / originalSize)) : 0;
     const savedAbs = Math.abs(percentSaved);
 
-    // Always leave the exact final numbers in the DOM, however the animation ends.
     const writeFinal = () => {
       if (newEl) newEl.textContent = formatBytes(compressedSize);
       if (savedEl) savedEl.textContent = String(savedAbs);
@@ -521,7 +495,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       }, root);
     }
 
-    // On small screens the panel can land below the fold, so glide down to it.
     const rect = root.getBoundingClientRect();
     if (rect.bottom > window.innerHeight) {
       const lenis = getLenis();
@@ -538,7 +511,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     };
   }, [resultsReady, originalSize, compressedSize, percentSaved]);
 
-  // Error panel entrance
   useEffect(() => {
     const el = errorRef.current;
     if (!resultsFailed || !el) return;
@@ -562,6 +534,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       <PixelStyles />
       <style>{PAGE_CSS}</style>
       <WelcomeModal />
+      
       {isProcessing && (
         <LoadingOverlay
           title={stage === "zip" ? "Packing your zip" : "Compressing your images"}
@@ -583,9 +556,9 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         />
       )}
 
-      {/* Header: full-width hairline, content aligned to the page container */}
-      <header data-reveal className="ps-reveal border-b border-neutral-200/80">
-        <div className="mx-auto flex w-full max-w-6xl items-center justify-between px-4 py-4 sm:px-6 sm:py-5 lg:px-10 2xl:max-w-[76rem]">
+      {/* Header with solid black brutalist border */}
+      <header data-reveal className="ps-reveal border-b-[3px] border-neutral-900 bg-white">
+        <div className="mx-auto flex w-full max-w-[1760px] items-center justify-between px-4 py-4 sm:px-6 sm:py-5 lg:px-10 2xl:px-14">
           <a
             href="/"
             onClick={scrollToTop}
@@ -594,7 +567,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             onFocus={() => setMarkActive(true)}
             onBlur={() => setMarkActive(false)}
             aria-label="PixShrink, back to top"
-            className="inline-flex items-center gap-2.5 rounded-md focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/30 focus-visible:ring-offset-4 focus-visible:ring-offset-[#f7f6f3]"
+            className="inline-flex items-center gap-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/30 focus-visible:ring-offset-4 focus-visible:ring-offset-white"
           >
             <PixelMosaic size={28} grid={4} animated={markActive} />
             <span className="font-[family-name:var(--font-pixel)] text-[1.55rem] font-semibold leading-none tracking-tight text-neutral-900 sm:text-[1.7rem]">
@@ -604,40 +577,74 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         </div>
       </header>
 
-      <div className="mx-auto w-full max-w-6xl px-4 sm:px-6 lg:px-10 2xl:max-w-[76rem]">
-        {/* Hero */}
-        <section className="pb-12 pt-10 sm:pb-14 sm:pt-14 md:pt-20 lg:pb-16 lg:pt-24">
-          <div
-            data-reveal
-            className="ps-reveal inline-flex items-center gap-2 rounded-full border border-neutral-300/80 px-3 py-1 text-xs font-medium text-neutral-600"
-          >
-            <span aria-hidden="true" className="ps-blink h-1.5 w-1.5 bg-emerald-500" />
-            {engineLabel}
+      {/* UPGRADED: The Bento Box Layout */}
+      <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-10 px-4 py-8 sm:px-6 sm:py-12 lg:flex-row lg:items-start lg:gap-16 lg:px-10 lg:py-20 2xl:gap-24 2xl:px-14">
+        
+        {/* LEFT COLUMN - STICKY */}
+        <aside className="flex flex-col gap-8 lg:sticky lg:top-10 lg:w-[400px] xl:w-[460px] shrink-0">
+          <div>
+            <div
+              data-reveal
+              className="ps-reveal mb-6 inline-flex items-center gap-2 rounded-none border-[2px] border-neutral-900 bg-white px-3 py-1 text-xs font-bold uppercase tracking-wider text-neutral-900 shadow-[2px_2px_0_rgba(17,17,17,1)]"
+            >
+              <span aria-hidden="true" className="ps-blink h-2 w-2 rounded-full bg-[var(--accent)]" />
+              {engineLabel}
+            </div>
+
+            <h1 className="text-[clamp(2.5rem,5.5vw,4.5rem)] font-black leading-[0.95] tracking-[-0.03em] text-neutral-900">
+              <span className="block">
+                <Words text="Shrink images in bulk." />
+              </span>
+              <span className="block text-neutral-400">
+                <Words text="Keep them on your device." />
+              </span>
+            </h1>
+
+            <p
+              data-reveal
+              className="ps-reveal mt-6 max-w-[40ch] text-base font-medium leading-relaxed text-neutral-500 sm:mt-8 sm:text-lg"
+            >
+              {activeEngine === "local"
+                ? "Compress, resize and convert images right in your browser. Nothing is uploaded, and the only limit is your own device."
+                : "Compress, resize and convert images. Files are processed by ImageKit and deleted from the cloud right after."}
+            </p>
           </div>
 
-          <h1 className="mt-6 text-[clamp(2.25rem,6.6vw,5rem)] font-semibold leading-[0.98] tracking-[-0.045em] text-neutral-900 sm:mt-8">
-            <span className="block">
-              <Words text="Shrink images in bulk." />
-            </span>
-            <span className="block text-neutral-500">
-              <Words text="Keep them on your device." />
-            </span>
-          </h1>
+          {/* AD PLACEMENT SLOT (Hidden on mobile, stays sticky on desktop) */}
+          <div data-reveal className="ps-reveal mt-8 hidden w-full lg:block">
+            <div className="flex h-[400px] w-full flex-col items-center justify-center rounded-none border-[3px] border-neutral-900 bg-neutral-100 shadow-[6px_6px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 hover:shadow-[10px_10px_0_rgba(17,17,17,1)]">
+              <span className="font-mono text-xs font-bold uppercase tracking-widest text-neutral-400">Ad Space</span>
+              <span className="mt-2 max-w-[200px] text-center text-xs text-neutral-400">Reserved for future high-visibility vertical placement</span>
+            </div>
+          </div>
+        </aside>
 
-          <p
-            data-reveal
-            className="ps-reveal mt-6 max-w-[46ch] text-base leading-relaxed text-neutral-500 sm:mt-8 sm:text-lg"
-          >
-            {activeEngine === "local"
-              ? "Compress, resize and convert images right in your browser. Nothing is uploaded, and the only limit is your own device."
-              : "Compress, resize and convert images. Files are processed by ImageKit and deleted from the cloud right after."}
-          </p>
-        </section>
-
-        {/* Tool: three numbered steps on the open page, no enclosing card */}
-        <div className="space-y-12 pb-24 sm:space-y-14 sm:pb-28 md:space-y-16">
+        {/* RIGHT COLUMN - THE TOOL */}
+        <div className="flex-1 space-y-14 sm:space-y-20 lg:pt-4">
+          
           <section data-reveal className="ps-reveal">
             <StepLabel n={1}>Add your images</StepLabel>
+            
+            {hasHeic && (
+              <div className="mb-6 rounded-none border-[3px] border-neutral-900 bg-[#FFE600] p-5 shadow-[4px_4px_0_rgba(17,17,17,1)] text-left">
+                <div className="flex items-start gap-4">
+                  <svg className="mt-0.5 h-6 w-6 shrink-0 text-neutral-900" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor">
+                    <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+                  </svg>
+                  <div>
+                    <h3 className="text-sm font-black uppercase tracking-wide text-neutral-900">HEIC Images Detected</h3>
+                    <p className="mt-1 text-sm font-medium text-neutral-800">
+                      Operations on Apple HEIC images can be slower. Processing them locally means:
+                    </p>
+                    <ul className="mt-2 list-disc pl-5 text-sm font-medium text-neutral-800 space-y-1">
+                      <li>Preview generation will take slightly longer.</li>
+                      <li>Compression runs slower compared to standard JPG/PNG files.</li>
+                    </ul>
+                  </div>
+                </div>
+              </div>
+            )}
+
             <ImageDropzone
               files={files}
               onFilesAdded={handleFilesAdded}
@@ -648,6 +655,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
           <section data-reveal className="ps-reveal">
             <StepLabel n={2}>Choose your settings</StepLabel>
+            {/* The internal design of CompressionControls will be updated in the next step! */}
             <CompressionControls
               width={width} setWidth={setWidth}
               quality={quality} setQuality={setQuality}
@@ -662,20 +670,21 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           <section data-reveal className="ps-reveal">
             <StepLabel n={3}>Compress and download</StepLabel>
             <div className="flex flex-col items-stretch gap-6">
+              
               <div ref={buttonWrapRef} className="w-full sm:w-auto sm:self-start">
                 <button
                   ref={buttonRef}
                   onClick={processImages}
                   disabled={isDisabled}
-                  className={`group relative flex h-14 w-full items-center justify-center gap-3 rounded-2xl px-6 text-sm font-medium transition-[background-color,box-shadow,color] duration-300 focus:outline-none focus-visible:ring-4 focus-visible:ring-neutral-300 sm:min-w-[22rem] md:text-base ${
+                  className={`group relative flex h-14 w-full items-center justify-center gap-3 rounded-none border-[3px] border-neutral-900 px-6 text-sm font-black uppercase tracking-widest transition-colors focus:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30 sm:min-w-[22rem] md:text-base ${
                     isDisabled
-                      ? "pointer-events-none cursor-not-allowed bg-neutral-200 text-neutral-400"
-                      : "cursor-pointer bg-neutral-900 text-white shadow-[0_14px_32px_-12px_rgba(0,0,0,0.55)] hover:bg-black"
+                      ? "pointer-events-none cursor-not-allowed bg-neutral-200 text-neutral-400 border-neutral-300"
+                      : "cursor-pointer bg-[var(--accent)] text-neutral-900 neo-shadow"
                   }`}
                 >
                   <span>{isProcessing ? "Processing Batch..." : "Compress & Download Zip"}</span>
                   {!isProcessing && files.length > 0 && (
-                    <span className="rounded-full bg-white/15 px-2 py-0.5 font-mono text-[11px] leading-none">
+                    <span className="rounded-full bg-neutral-900 px-2.5 py-1 font-mono text-[11px] leading-none text-white">
                       {files.length}
                     </span>
                   )}
@@ -686,11 +695,11 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                     </svg>
                   ) : (
                     <svg
-                      className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-0.5"
+                      className="h-4 w-4 transition-transform duration-300 group-hover:translate-x-1"
                       viewBox="0 0 24 24"
                       fill="none"
                       stroke="currentColor"
-                      strokeWidth="2"
+                      strokeWidth="2.5"
                       strokeLinecap="round"
                       strokeLinejoin="round"
                       aria-hidden="true"
@@ -706,60 +715,60 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                   ref={resultsRef}
                   role="status"
                   aria-live="polite"
-                  className="w-full rounded-2xl border border-neutral-200 bg-neutral-50/70 p-5 text-left opacity-0 md:max-w-2xl md:p-6"
+                  className="w-full rounded-none border-[3px] border-neutral-900 bg-white p-5 text-left opacity-0 shadow-[6px_6px_0_rgba(17,17,17,1)] md:max-w-2xl md:p-6 lg:p-8"
                 >
                   <div className="flex items-start gap-3">
-                    <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full bg-emerald-500/10 text-emerald-600">
-                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
+                    <span className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-none border-2 border-neutral-900 bg-[var(--accent)] text-neutral-900">
+                      <svg className="h-4 w-4" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" aria-hidden="true">
                         <path d="M5 12.5l4.5 4.5L19 7.5" />
                       </svg>
                     </span>
                     <div>
-                      <h3 className="text-sm font-semibold text-neutral-900 md:text-base">Compression Complete!</h3>
-                      <p className="text-xs text-neutral-500 md:text-sm">Your zip file has been downloaded.</p>
+                      <h3 className="text-sm font-black uppercase tracking-wide text-neutral-900 md:text-base">Compression Complete</h3>
+                      <p className="mt-1 text-xs font-medium text-neutral-500 md:text-sm">Your zip file has been downloaded.</p>
                     </div>
                   </div>
 
-                  <div className="mt-5 flex items-end justify-between gap-4">
+                  <div className="mt-8 flex items-end justify-between gap-4">
                     <div>
-                      <p className="text-xs text-neutral-400">Original</p>
-                      <p className="font-mono text-sm text-neutral-400 line-through">{formatBytes(originalSize)}</p>
+                      <p className="text-xs font-bold uppercase tracking-widest text-neutral-400">Original</p>
+                      <p className="font-mono text-sm font-medium text-neutral-400 line-through">{formatBytes(originalSize)}</p>
                     </div>
                     <div className="text-right">
-                      <p className="text-xs font-medium text-emerald-600">New Size</p>
-                      <p ref={newSizeRef} className="font-mono text-2xl font-semibold tracking-tight text-neutral-900 md:text-3xl">
+                      <p className="text-xs font-bold uppercase tracking-widest text-neutral-900">New Size</p>
+                      <p ref={newSizeRef} className="font-mono text-3xl font-black tracking-tight text-neutral-900 md:text-4xl">
                         {formatBytes(compressedSize)}
                       </p>
                     </div>
                   </div>
 
-                  <div className="mt-4 h-1.5 w-full overflow-hidden rounded-full bg-neutral-200">
+                  <div className="mt-4 h-3 w-full overflow-hidden rounded-none border-[2px] border-neutral-900 bg-neutral-100">
                     <div
                       ref={barRef}
-                      className={`h-full w-full origin-left rounded-full ${percentSaved >= 0 ? "bg-emerald-500" : "bg-amber-500"}`}
+                      className={`h-full w-full origin-left ${percentSaved >= 0 ? "bg-[var(--accent)]" : "bg-neutral-800"}`}
                     />
                   </div>
 
-                  <p className="mt-3 text-sm text-neutral-500">
-                    <span className="font-semibold text-neutral-900">
+                  <p className="mt-4 text-sm font-medium text-neutral-500">
+                    <span className="font-black text-neutral-900">
                       {percentSaved >= 0 ? "Saved" : "Larger by"} <span ref={savedRef}>{Math.abs(percentSaved)}</span>%
                     </span>
                     {percentSaved >= 0 && " of total size"}
                   </p>
 
                   {breakdown && (
-                    <p className="mt-4 border-t border-neutral-200 pt-4 font-mono text-[11px] text-neutral-500">{breakdown}</p>
+                    <p className="mt-5 border-t-2 border-neutral-100 pt-4 font-mono text-[11px] font-bold uppercase tracking-wider text-neutral-400">{breakdown}</p>
                   )}
 
                   {downloads.length > 0 && (
-                    <p className="mt-3 flex flex-wrap gap-x-3 gap-y-1 text-xs text-neutral-500">
+                    <p className="mt-4 flex flex-wrap gap-x-3 gap-y-1 text-xs font-medium text-neutral-500">
                       <span>Download didn&apos;t start?</span>
                       {downloads.map((d) => (
                         <a
                           key={d.name}
                           href={d.url}
                           download={d.name}
-                          className="font-medium text-neutral-900 underline underline-offset-2 transition-colors hover:text-black"
+                          className="font-bold text-neutral-900 underline decoration-2 underline-offset-4 transition-colors hover:text-[var(--accent)]"
                         >
                           {d.name}
                         </a>
@@ -768,12 +777,12 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                   )}
 
                   {runInfo.stopped > 0 && (
-                    <p className="mt-3 text-xs text-amber-700">
+                    <p className="mt-3 text-xs font-medium text-amber-600">
                       Stopped early. {runInfo.stopped} image{runInfo.stopped === 1 ? "" : "s"} left in the queue.
                     </p>
                   )}
                   {runInfo.failed.length > 0 && (
-                    <p className="mt-3 text-xs text-amber-700">
+                    <p className="mt-3 text-xs font-medium text-red-600">
                       {runInfo.failed.length} failed and stayed in the queue so you can retry:{" "}
                       {runInfo.failed.slice(0, 3).map((f) => f.name).join(", ")}
                       {runInfo.failed.length > 3 ? ` and ${runInfo.failed.length - 3} more` : ""}.
@@ -787,10 +796,10 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                 <div
                   ref={errorRef}
                   role="alert"
-                  className="w-full rounded-2xl border border-red-200 bg-red-50/60 p-5 text-left opacity-0 md:max-w-2xl md:p-6"
+                  className="w-full rounded-none border-[3px] border-neutral-900 bg-red-50 p-5 text-left opacity-0 shadow-[6px_6px_0_rgba(17,17,17,1)] md:max-w-2xl md:p-6"
                 >
-                  <h3 className="text-sm font-semibold text-red-800 md:text-base">Nothing could be compressed</h3>
-                  <p className="mt-1 text-xs text-red-600 md:text-sm">
+                  <h3 className="text-sm font-black uppercase tracking-wide text-red-600 md:text-base">Nothing could be compressed</h3>
+                  <p className="mt-2 text-xs font-medium text-red-600 md:text-sm">
                     {runInfo.failed.length > 0
                       ? runInfo.failed[0].reason
                       : activeEngine === "imagekit"

@@ -7,8 +7,8 @@ import { canEncodeLocally } from "@/lib/localCompress";
 const PRESETS = [
   { label: "Default", w: 1080, q: 80, f: "webp" },
   { label: "Web Optimized", w: 1536, q: 80, f: "webp" },
-  { label: "High-Res Archival", w: 2400, q: 90, f: "jpg" },
-  { label: "Tiny Thumbnails", w: 400, q: 60, f: "avif" },
+  { label: "High-Res", w: 2400, q: 90, f: "jpg" },
+  { label: "Thumbnails", w: 400, q: 60, f: "avif" },
 ];
 
 const FORMATS = [
@@ -24,96 +24,60 @@ const ENGINES = [
   { id: "auto", label: "Auto", hint: "Tries ImageKit first and switches to local if it fails or the quota runs out." },
 ];
 
-// ---------------------------------------------------------------------------------------
-// Design helpers (UI only, no effect on the compression settings logic)
-// ---------------------------------------------------------------------------------------
 const prefersReducedMotion = () =>
   typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
-const labelCls = "text-[13px] font-medium text-neutral-600";
+const labelCls = "text-xs font-black uppercase tracking-widest text-neutral-900";
 
-// Range sliders and number inputs need pseudo-element styling, so they live in a small scoped sheet.
+// UPGRADED: Brutalist sliders with thick borders and blocky thumbs
 const CSS = `
-.cc-range{-webkit-appearance:none;appearance:none;width:100%;height:20px;background:transparent;cursor:pointer;outline:none;margin:0}
-.cc-range::-webkit-slider-runnable-track{height:6px;border-radius:9999px;background:linear-gradient(to right,#171717 var(--p,0%),#e5e5e5 var(--p,0%))}
-.cc-range::-webkit-slider-thumb{-webkit-appearance:none;appearance:none;height:20px;width:20px;margin-top:-7px;border-radius:9999px;background:#fff;border:1px solid #d4d4d4;box-shadow:0 2px 6px rgba(0,0,0,.18);transition:transform .2s ease,box-shadow .2s ease}
-.cc-range:hover::-webkit-slider-thumb{transform:scale(1.08)}
-.cc-range:active::-webkit-slider-thumb{transform:scale(1.16)}
-.cc-range:focus-visible::-webkit-slider-thumb{box-shadow:0 0 0 4px rgba(23,23,23,.15),0 2px 6px rgba(0,0,0,.18)}
-.cc-range::-moz-range-track{height:6px;border-radius:9999px;background:linear-gradient(to right,#171717 var(--p,0%),#e5e5e5 var(--p,0%))}
-.cc-range::-moz-range-thumb{height:18px;width:18px;border-radius:9999px;background:#fff;border:1px solid #d4d4d4;box-shadow:0 2px 6px rgba(0,0,0,.18);transition:transform .2s ease,box-shadow .2s ease}
-.cc-range:hover::-moz-range-thumb{transform:scale(1.08)}
-.cc-range:active::-moz-range-thumb{transform:scale(1.16)}
-.cc-range:focus-visible::-moz-range-thumb{box-shadow:0 0 0 4px rgba(23,23,23,.15),0 2px 6px rgba(0,0,0,.18)}
-.cc-num{-moz-appearance:textfield;appearance:textfield}
-.cc-num::-webkit-outer-spin-button,.cc-num::-webkit-inner-spin-button{-webkit-appearance:none;margin:0}
+.cc-range {-webkit-appearance:none; appearance:none; width:100%; height:32px; background:transparent; cursor:pointer; outline:none; margin:0}
+.cc-range::-webkit-slider-runnable-track {height:12px; background:linear-gradient(to right, #111 var(--p,0%), #e5e5e5 var(--p,0%)); border:3px solid #111;}
+.cc-range::-webkit-slider-thumb {-webkit-appearance:none; appearance:none; height:24px; width:14px; margin-top:-9px; background:#fff; border:3px solid #111; transition:background 0.15s ease;}
+.cc-range:hover::-webkit-slider-thumb {background: var(--accent);}
+.cc-range:active::-webkit-slider-thumb {background: #111;}
+.cc-range:focus-visible::-webkit-slider-thumb {background: var(--accent); box-shadow: 0 0 0 2px #fff, 0 0 0 5px #111;}
+
+.cc-range::-moz-range-track {height:12px; background:linear-gradient(to right, #111 var(--p,0%), #e5e5e5 var(--p,0%)); border:3px solid #111;}
+.cc-range::-moz-range-thumb {height:24px; width:14px; background:#fff; border:3px solid #111; border-radius:0; transition:background 0.15s ease;}
+.cc-range:hover::-moz-range-thumb {background: var(--accent);}
+.cc-range:active::-moz-range-thumb {background: #111;}
+.cc-range:focus-visible::-moz-range-thumb {background: var(--accent); box-shadow: 0 0 0 2px #fff, 0 0 0 5px #111;}
+
+.cc-num {-moz-appearance:textfield; appearance:textfield}
+.cc-num::-webkit-outer-spin-button, .cc-num::-webkit-inner-spin-button {-webkit-appearance:none; margin:0}
 `;
 
-// Segmented control with a white "pill" that glides to the selected option (GSAP).
+// UPGRADED: A rigid, hard-bordered grid instead of a sliding pill
 function Segmented({ options, value, onChange, label, fullWidth = false }) {
-  const wrapRef = useRef(null);
-  const indicatorRef = useRef(null);
-  const btnRefs = useRef({});
-  const placedRef = useRef(false);
-
-  useEffect(() => {
-    const wrap = wrapRef.current;
-    const indicator = indicatorRef.current;
-    const btn = btnRefs.current[value];
-    if (!wrap || !indicator || !btn) return;
-
-    const target = () => ({ x: btn.offsetLeft, width: btn.offsetWidth, opacity: 1 });
-
-    if (placedRef.current && !prefersReducedMotion()) {
-      gsap.to(indicator, { ...target(), duration: 0.45, ease: "power3.out", overwrite: "auto" });
-    } else {
-      gsap.set(indicator, target()); // first paint (and reduced motion): no travel
-    }
-    placedRef.current = true;
-
-    // Keep the pill aligned if the control is resized (window resize, font load, wrapping)
-    const ro = new ResizeObserver(() => {
-      if (!gsap.isTweening(indicator)) gsap.set(indicator, target());
-    });
-    ro.observe(wrap);
-    return () => ro.disconnect();
-  }, [value]);
-
   return (
     <div
-      ref={wrapRef}
       role="group"
       aria-label={label}
-      className={`relative flex rounded-xl bg-neutral-100 p-1 ring-1 ring-inset ring-neutral-200/70 ${
+      className={`flex rounded-none border-[3px] border-neutral-900 bg-white shadow-[3px_3px_0_rgba(17,17,17,1)] overflow-hidden ${
         fullWidth ? "w-full" : "w-fit"
       }`}
     >
-      <span
-        ref={indicatorRef}
-        aria-hidden="true"
-        className="pointer-events-none absolute bottom-1 left-0 top-1 w-0 rounded-lg bg-white opacity-0 shadow-[0_1px_2px_rgba(0,0,0,0.08),0_0_0_1px_rgba(0,0,0,0.04)]"
-      />
-      {options.map((o) => {
+      {options.map((o, i) => {
         const active = o.value === value;
         return (
           <button
             key={o.value}
             type="button"
-            ref={(el) => {
-              btnRefs.current[o.value] = el;
-            }}
             onClick={() => onChange(o.value)}
             disabled={o.disabled}
             title={o.title}
             aria-pressed={active}
-            className={`relative z-10 rounded-lg px-3.5 py-1.5 text-xs font-medium transition-colors duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/30 ${
+            className={`relative px-4 py-2 text-xs font-black uppercase tracking-widest transition-colors focus:outline-none focus-visible:bg-neutral-200 ${
               fullWidth ? "flex-1" : ""
             } ${
+              i !== 0 ? "border-l-[3px] border-neutral-900" : ""
+            } ${
               o.disabled
-                ? "cursor-not-allowed text-neutral-300 line-through"
+                ? "cursor-not-allowed bg-neutral-100 text-neutral-300 line-through"
                 : active
-                ? "cursor-pointer text-neutral-900"
-                : "cursor-pointer text-neutral-500 hover:text-neutral-800"
+                ? "cursor-pointer bg-[var(--accent)] text-neutral-900"
+                : "cursor-pointer bg-white text-neutral-500 hover:bg-neutral-100 hover:text-neutral-900"
             }`}
           >
             {o.label}
@@ -135,7 +99,6 @@ export default function CompressionControls({
 }) {
   const [localSupport, setLocalSupport] = useState({});
 
-  // Probe which formats this browser can encode (AVIF/WebP support varies by browser).
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -146,7 +109,6 @@ export default function CompressionControls({
     return () => { cancelled = true; };
   }, []);
 
-  // If the browser can't encode the chosen format locally, fall back to WebP.
   useEffect(() => {
     if (engine === "local" && localSupport[format] === false) setFormat("webp");
   }, [engine, localSupport, format, setFormat]);
@@ -163,10 +125,6 @@ export default function CompressionControls({
   };
 
   const hasTarget = Number(maxKB) > 0;
-
-  // -------------------------------------------------------------------------------------
-  // Design + GSAP (everything below only affects how the controls look and move)
-  // -------------------------------------------------------------------------------------
   const uid = useId();
   const hintRef = useRef(null);
 
@@ -182,10 +140,10 @@ export default function CompressionControls({
       title: blocked ? `${label} (not supported by this browser)` : undefined,
     };
   });
+  
   const formatNote = FORMATS.find(([v]) => v === format)?.[1].match(/\((.*)\)/)?.[1];
   const engineOptions = ENGINES.map((e) => ({ value: e.id, label: e.label }));
 
-  // The "max file size" note eases in when a target is set
   useEffect(() => {
     const el = hintRef.current;
     if (!hasTarget || !el || prefersReducedMotion()) return;
@@ -204,9 +162,9 @@ export default function CompressionControls({
     <div className="mb-8 text-left md:mb-10">
       <style>{CSS}</style>
 
-      <div className="mb-5 flex flex-col gap-3 sm:flex-row sm:items-center">
-        <span className={`${labelCls} sm:w-28 sm:shrink-0`}>Quick Presets</span>
-        <div className="flex flex-wrap gap-2">
+      <div className="mb-8 flex flex-col gap-4 sm:flex-row sm:items-center">
+        <span className={`${labelCls} sm:w-32 sm:shrink-0`}>Quick Presets</span>
+        <div className="flex flex-wrap gap-2.5">
           {PRESETS.map((p) => {
             const active = width === p.w && quality === p.q && format === p.f;
             return (
@@ -214,10 +172,10 @@ export default function CompressionControls({
                 key={p.label}
                 onClick={() => applyPreset(p.w, p.q, p.f)}
                 aria-pressed={active}
-                className={`cursor-pointer rounded-full border px-4 py-1.5 text-xs font-medium transition-all duration-300 focus:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/30 active:scale-[0.97] ${
+                className={`cursor-pointer border-[3px] border-neutral-900 px-4 py-2 text-xs font-black uppercase tracking-wider transition-all focus:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30 ${
                   active
-                    ? "border-neutral-900 bg-neutral-900 text-white shadow-sm"
-                    : "border-neutral-200 bg-white text-neutral-600 hover:border-neutral-300 hover:text-neutral-900"
+                    ? "bg-neutral-900 text-[var(--accent)] shadow-[3px_3px_0_var(--accent)]"
+                    : "bg-white text-neutral-900 shadow-[3px_3px_0_rgba(17,17,17,1)] hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[5px_5px_0_var(--accent)] active:translate-y-0 active:translate-x-0 active:shadow-[0_0_0_rgba(17,17,17,1)]"
                 }`}
               >
                 {p.label}
@@ -227,24 +185,24 @@ export default function CompressionControls({
         </div>
       </div>
 
-      {/* Engine selector: only exists when the server confirmed ImageKit is configured
-          and ENVIRONMENT_MODE is "development". Otherwise the app is Local-only. */}
       {imagekitAvailable && (
-        <div className="mb-6">
-          <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
-            <span className={`${labelCls} sm:w-28 sm:shrink-0`}>Engine</span>
+        <div className="mb-8">
+          <div className="flex flex-col gap-4 sm:flex-row sm:items-center">
+            <span className={`${labelCls} sm:w-32 sm:shrink-0`}>Engine</span>
             <Segmented options={engineOptions} value={engine} onChange={setEngine} label="Compression engine" />
           </div>
-          <p className="mt-2 text-xs text-neutral-500 sm:pl-28">
+          <p className="mt-3 font-mono text-[11px] font-bold uppercase tracking-wider text-neutral-500 sm:pl-32">
             {ENGINES.find((e) => e.id === engine)?.hint}
           </p>
         </div>
       )}
 
-      <div className="mb-6 grid grid-cols-1 gap-7 rounded-2xl border border-neutral-200/80 bg-neutral-50/60 p-5 md:grid-cols-3 md:gap-8 md:p-7">
+      {/* Main Settings Bento Box */}
+      <div className="mb-6 grid grid-cols-1 gap-7 rounded-none border-[3px] border-neutral-900 bg-white p-6 shadow-[6px_6px_0_rgba(17,17,17,1)] md:grid-cols-3 md:gap-8 md:p-8">
+        
         <div className="flex flex-col justify-between">
-          <div className="mb-3 flex h-8 items-center justify-between">
-            <label htmlFor={`${uid}-width`} className={labelCls}>Target Width</label>
+          <div className="mb-4 flex h-8 items-center justify-between">
+            <label htmlFor={`${uid}-width`} className={labelCls}>Width</label>
             <div className="flex items-center gap-1.5">
               <input
                 id={`${uid}-width`}
@@ -254,9 +212,9 @@ export default function CompressionControls({
                 value={width}
                 onChange={(e) => setWidth(e.target.value === "" ? "" : Number(e.target.value))}
                 onBlur={handleWidthBlur}
-                className="cc-num h-8 w-[4.5rem] rounded-md border border-neutral-200 bg-white px-2 text-right font-mono text-sm font-semibold text-neutral-900 outline-none transition-colors focus:border-neutral-900"
+                className="cc-num h-8 w-[4.5rem] rounded-none border-[2px] border-neutral-900 bg-neutral-100 px-2 text-right font-mono text-sm font-bold text-neutral-900 outline-none transition-colors focus:border-[var(--accent)] focus:bg-white"
               />
-              <span className="font-mono text-xs text-neutral-400">px</span>
+              <span className="font-mono text-xs font-bold text-neutral-400">PX</span>
             </div>
           </div>
           <div className="flex h-10 items-center">
@@ -274,9 +232,9 @@ export default function CompressionControls({
         </div>
 
         <div className="flex flex-col justify-between">
-          <div className="mb-3 flex h-8 items-center justify-between">
+          <div className="mb-4 flex h-8 items-center justify-between">
             <label htmlFor={`${uid}-quality`} className={labelCls}>Quality</label>
-            <span className="font-mono text-sm font-semibold text-neutral-900">{quality}</span>
+            <span className="font-mono text-xl font-black text-neutral-900">{quality}</span>
           </div>
           <div className="flex h-10 items-center">
             <input
@@ -293,10 +251,10 @@ export default function CompressionControls({
         </div>
 
         <div className="flex flex-col justify-between">
-          <div className="mb-3 flex h-8 items-center justify-between">
-            <span className={labelCls}>Output Format</span>
+          <div className="mb-4 flex h-8 items-center justify-between">
+            <span className={labelCls}>Format</span>
             {formatNote && (
-              <span className="font-mono text-[11px] uppercase tracking-[0.12em] text-neutral-400">{formatNote}</span>
+              <span className="font-mono text-[10px] font-bold uppercase tracking-widest text-[var(--accent)] drop-shadow-[0.5px_0.5px_0_rgba(17,17,17,1)]">{formatNote}</span>
             )}
           </div>
           <div className="flex h-10 items-center">
@@ -305,43 +263,55 @@ export default function CompressionControls({
         </div>
       </div>
 
+      {/* Advanced Settings Row */}
       <div className="px-1">
-        <div className="flex flex-col gap-4 sm:flex-row sm:items-center sm:gap-8">
-          <label className="flex items-center gap-3 text-sm font-medium text-neutral-700">
-            Max file size
-            <span className="flex h-9 items-center rounded-lg border border-neutral-200 bg-white pr-2.5 transition-colors focus-within:border-neutral-900">
+        <div className="flex flex-col gap-5 sm:flex-row sm:items-center sm:gap-8">
+          <label className="flex items-center gap-3 text-xs font-black uppercase tracking-wider text-neutral-900">
+            Max Limit
+            <span className="flex h-10 items-center rounded-none border-[3px] border-neutral-900 bg-white pr-3 shadow-[2px_2px_0_rgba(17,17,17,1)] transition-colors focus-within:border-[var(--accent)]">
               <input
                 type="number"
                 min="10"
-                placeholder="off"
+                placeholder="OFF"
                 value={maxKB}
                 onChange={(e) => setMaxKB(e.target.value)}
-                className="cc-num h-full w-16 bg-transparent px-2 text-right font-mono text-sm font-semibold text-neutral-900 outline-none placeholder:font-normal placeholder:text-neutral-400"
+                className="cc-num h-full w-16 bg-transparent px-3 text-right font-mono text-sm font-bold text-neutral-900 outline-none placeholder:font-normal placeholder:text-neutral-400"
               />
-              <span className="font-mono text-xs text-neutral-400">KB</span>
+              <span className="font-mono text-xs font-bold text-neutral-400">KB</span>
             </span>
           </label>
-          <label className="flex cursor-pointer select-none items-center gap-3 text-sm text-neutral-700">
-            <input
-              type="checkbox"
-              checked={keepIfLarger}
-              onChange={(e) => setKeepIfLarger(e.target.checked)}
-              className="peer sr-only"
-            />
-            <span
-              aria-hidden="true"
-              className="relative h-5 w-9 shrink-0 rounded-full bg-neutral-300 transition-colors duration-300 after:absolute after:left-0.5 after:top-0.5 after:h-4 after:w-4 after:rounded-full after:bg-white after:shadow after:transition-transform after:duration-300 after:content-[''] peer-checked:bg-neutral-900 peer-checked:after:translate-x-4 peer-focus-visible:ring-4 peer-focus-visible:ring-neutral-300"
-            />
-            Keep the original if the result is larger
+
+          <label className="flex cursor-pointer select-none items-center gap-3 text-xs font-black uppercase tracking-wider text-neutral-900">
+            <div className="relative flex items-center">
+              <input
+                type="checkbox"
+                checked={keepIfLarger}
+                onChange={(e) => setKeepIfLarger(e.target.checked)}
+                className="peer sr-only"
+              />
+              {/* Hard brutalist square toggle box */}
+              <div className="h-6 w-6 rounded-none border-[3px] border-neutral-900 bg-white transition-colors duration-200 peer-checked:bg-[var(--accent)] peer-focus-visible:ring-4 peer-focus-visible:ring-neutral-900/30" />
+              <svg 
+                className={`absolute inset-0 h-6 w-6 pointer-events-none stroke-neutral-900 stroke-[3px] transition-transform duration-200 ${keepIfLarger ? "scale-100" : "scale-0"}`} 
+                fill="none" 
+                viewBox="0 0 24 24" 
+                strokeLinecap="square" 
+                strokeLinejoin="miter"
+              >
+                <path d="M5 13l4 4L19 7" />
+              </svg>
+            </div>
+            Keep original if result is larger
           </label>
         </div>
+
         {hasTarget && (
-          <p ref={hintRef} className="mt-3 text-xs text-neutral-500">
+          <p ref={hintRef} className="mt-4 font-mono text-[11px] font-bold uppercase tracking-wider text-neutral-500">
             {format === "png"
               ? "PNG is lossless, so a max file size has no effect on it."
               : imagekitAvailable
-              ? "Max file size runs in your browser and uses the quality slider as an upper limit, regardless of the engine selected."
-              : "The quality slider is the upper limit. Quality is lowered only as far as needed to fit."}
+              ? "Max file size runs locally and uses the quality slider as an upper limit."
+              : "The quality slider is the upper limit. Quality is lowered to fit."}
           </p>
         )}
       </div>

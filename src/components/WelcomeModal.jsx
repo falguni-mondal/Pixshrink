@@ -3,8 +3,6 @@
 import { useEffect, useRef, useState } from "react";
 import { PixelMosaic } from "@/components/PixelLoader";
 
-// Shown once per browser session. To show it on every page load instead,
-// delete the sessionStorage lines below.
 const SEEN_KEY = "batch-compressor-welcome-seen";
 
 export default function WelcomeModal() {
@@ -26,7 +24,6 @@ export default function WelcomeModal() {
     } catch {}
   };
 
-  // Focus the button, close on Escape, and lock page scroll while the popup is open.
   useEffect(() => {
     if (!open) return;
     buttonRef.current?.focus();
@@ -46,7 +43,7 @@ export default function WelcomeModal() {
 
   return (
     <div
-      className="px-fade fixed inset-0 z-[60] flex items-center justify-center bg-gray-900/30 p-5 backdrop-blur-sm"
+      className="px-fade fixed inset-0 z-[60] flex items-center justify-center bg-neutral-900/40 p-5 backdrop-blur-sm"
       onClick={close}
     >
       <div
@@ -55,26 +52,27 @@ export default function WelcomeModal() {
         aria-labelledby="welcome-title"
         aria-describedby="welcome-desc"
         onClick={(e) => e.stopPropagation()}
-        className="px-rise w-full max-w-sm rounded-3xl bg-white p-8 text-center shadow-2xl shadow-gray-900/10 ring-1 ring-gray-900/5"
+        className="px-rise w-full max-w-sm rounded-none border-[3px] border-neutral-900 bg-white p-8 text-center shadow-[8px_8px_0_rgba(17,17,17,1)]"
       >
         <PixelMosaic size={72} className="mx-auto" />
 
-        <h2 id="welcome-title" className="mt-6 text-xl font-semibold tracking-tight text-gray-900">
-          Everything runs on your device
+        <h2 id="welcome-title" className="mt-8 text-xl font-black uppercase tracking-widest text-neutral-900">
+          Local Processing
         </h2>
-        <p id="welcome-desc" className="mt-3 text-sm leading-relaxed text-gray-500">
-          Your images are compressed right here in your browser and are never uploaded. That also
-          means your device sets the limits: how many images you can process, and how large they
-          can be, depends on its memory and speed.
+        
+        <p id="welcome-desc" className="mt-4 text-sm font-medium leading-relaxed text-neutral-600">
+          Your images are compressed right here in your browser and are never uploaded. 
+          The only limit is your device's memory.
         </p>
-        <p className="mt-3 text-xs leading-relaxed text-gray-500">
-          Working with a big batch? Process it in smaller groups.
+        
+        <p className="mt-5 border-t-[3px] border-neutral-900 pt-4 font-mono text-[11px] font-bold uppercase tracking-wider text-neutral-500">
+          Working with a massive batch? Process it in smaller groups.
         </p>
 
         <button
           ref={buttonRef}
           onClick={close}
-          className="mt-8 w-full cursor-pointer rounded-xl bg-gray-900 py-3 text-sm font-medium text-white transition-colors hover:bg-black focus:outline-none focus-visible:ring-4 focus-visible:ring-gray-300"
+          className="mt-8 w-full cursor-pointer rounded-none border-[3px] border-neutral-900 bg-[var(--accent)] py-3 text-sm font-black uppercase tracking-widest text-neutral-900 shadow-[4px_4px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[6px_6px_0_rgba(17,17,17,1)] active:translate-y-0 active:translate-x-0 active:shadow-none focus:outline-none  focus-visible:ring-neutral-900/30"
         >
           Got it
         </button>

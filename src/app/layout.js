@@ -13,9 +13,6 @@ const geistMono = Geist_Mono({
   subsets: ["latin"],
 });
 
-// Pixel font for the PixShrink wordmark (SIL Open Font License, free for commercial use).
-// It is a variable font (weights 400-700). Use it in components with:
-//   className="font-[family-name:var(--font-pixel)]"
 const pixelFont = Pixelify_Sans({
   variable: "--font-pixel",
   subsets: ["latin"],
@@ -23,7 +20,6 @@ const pixelFont = Pixelify_Sans({
 
 export const metadata = {
   applicationName: "PixShrink",
-  // Other pages (privacy, about...) can set just `title: "Privacy"` and get "Privacy | PixShrink".
   title: {
     default: "PixShrink | Batch image compressor",
     template: "%s | PixShrink",
@@ -37,11 +33,10 @@ export default function RootLayout({ children }) {
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} ${pixelFont.variable} h-full antialiased`}
     >
-      {/* The page background and text color live on <body> so the footer and any overscroll
-          area match the app (and don't flip dark if globals.css has a dark-mode default). */}
       <body
         suppressHydrationWarning
-        className="flex min-h-full flex-col bg-[#f7f6f3] text-neutral-900"
+        // REMOVED: bg-[#f7f6f3] so globals.css can apply the Dot Matrix background!
+        className="flex min-h-full flex-col text-neutral-900"
       >
         <SmoothScroll>
           {children}
