@@ -70,13 +70,14 @@ export async function compressImage(
   const mime = MIME[outFormat];
 
   const bitmap = await decodeBitmap(file);
+  let canvas = null;
 
   try {
     // Never upscale: a 500px image with a 1080px target stays 500px.
     const targetW = Math.min(Number(width) || bitmap.width, bitmap.width);
     const targetH = Math.max(1, Math.round(bitmap.height * (targetW / bitmap.width)));
 
-    const canvas = makeCanvas(targetW, targetH);
+    canvas = makeCanvas(targetW, targetH);
     const ctx = canvas.getContext("2d");
     ctx.imageSmoothingQuality = "high";
     if (outFormat === "jpg") {
@@ -114,6 +115,12 @@ export async function compressImage(
     return { blob, format: outFormat };
   } finally {
     bitmap.close?.();
+    // CRITICAL MEMORY FIX: Force Safari/Chrome to instantly drop the uncompressed 
+    // pixel array from RAM rather than waiting for the lazy garbage collector.
+    if (canvas) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
   }
 }
 
@@ -146,12 +153,13 @@ export async function decodeBitmap(file, options) {
 /** Small center-cropped square preview as a WebP blob. */
 export async function renderThumbnail(file, size = 160) {
   const bitmap = await decodeBitmap(file, { resizeWidth: size * 3, resizeQuality: "medium" });
+  let canvas = null;
   try {
     const side = Math.min(bitmap.width, bitmap.height);
     const sx = (bitmap.width - side) / 2;
     const sy = (bitmap.height - side) / 2;
 
-    const canvas = makeCanvas(size, size);
+    canvas = makeCanvas(size, size);
     const ctx = canvas.getContext("2d");
     ctx.imageSmoothingQuality = "high";
     ctx.drawImage(bitmap, sx, sy, side, side, 0, 0, size, size);
@@ -161,5 +169,10 @@ export async function renderThumbnail(file, size = 160) {
     return blob;
   } finally {
     bitmap.close?.();
+    // CRITICAL MEMORY FIX
+    if (canvas) {
+      canvas.width = 0;
+      canvas.height = 0;
+    }
   }
 }

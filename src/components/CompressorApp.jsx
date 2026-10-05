@@ -40,16 +40,16 @@ const makeNameRegistry = () => {
   };
 };
 
-const PART_LIMIT = 250 * 1024 * 1024;
+const isMobileDevice = () => {
+  if (typeof window === "undefined") return false;
+  return /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
+};
 
-// Mobile-safe concurrency: phones process 1 image at a time to prevent RAM crashes
+// Start a new zip after 40MB on mobile, or 250MB on desktop.
+const getPartLimit = () => isMobileDevice() ? 40 * 1024 * 1024 : 250 * 1024 * 1024;
+
 const getConcurrency = () => {
-  if (typeof window === "undefined") return 1;
-  const isMobile =
-    /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) ||
-    (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
-  if (isMobile) return 1;
-
+  if (isMobileDevice()) return 1;
   const cores = navigator.hardwareConcurrency || 4;
   const memory = typeof navigator.deviceMemory === "number" ? navigator.deviceMemory : 4;
   return Math.max(1, Math.min(3, Math.floor(cores / 2), memory <= 4 ? 2 : 3));
@@ -209,7 +209,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       const addToZip = (name, content, options, size) => {
         current.zip.file(uniqueName(name), content, options);
         current.bytes += size;
-        if (current.bytes >= PART_LIMIT) {
+        if (current.bytes >= getPartLimit()) {
           const full = current;
           current = { zip: new JSZip(), bytes: 0 };
           partJobs.push(generate(full.zip));
@@ -288,8 +288,15 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           completedCount++;
           setDoneCount(completedCount);
           setProgress((completedCount / queue.length) * 100);
-          // Micro-yield: gives mobile WebKit/Chrome time to garbage-collect canvases
-          await sleep(60);
+          
+          // ADAPTIVE GARBAGE COLLECTION YIELD
+          if (isMobileDevice()) {
+            // Massive files (> 5MB) get a 600ms sleep to ensure iOS drops the RAM. Normal files get 150ms.
+            const sleepTime = obj.file.size > 5 * 1024 * 1024 ? 600 : 150;
+            await sleep(sleepTime);
+          } else {
+            await sleep(10); // Tiny tick for desktop just to keep the UI smooth
+          }
         }
       };
 
@@ -556,7 +563,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         />
       )}
 
-      {/* Header with solid black brutalist border */}
       <header data-reveal className="ps-reveal border-b-[3px] border-neutral-900 bg-white">
         <div className="mx-auto flex w-full max-w-[1760px] items-center justify-between px-4 py-4 sm:px-6 sm:py-5 lg:px-10 2xl:px-14">
           <a
@@ -569,8 +575,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             aria-label="PixShrink, back to top"
             className="inline-flex items-center gap-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/30 focus-visible:ring-offset-4 focus-visible:ring-offset-white"
           >
-            {/* <PixelMosaic size={28} grid={4} animated={markActive} /> */}
-            
             <svg 
               className="h-[1.85rem] w-[1.85rem] shrink-0 overflow-visible" 
               viewBox="0 0 100 100" 
@@ -592,10 +596,8 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         </div>
       </header>
 
-      {/* The Bento Box Layout */}
       <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-10 px-4 py-8 sm:px-6 sm:py-12 lg:flex-row lg:items-start lg:gap-16 lg:px-10 lg:py-20 2xl:gap-24 2xl:px-14">
         
-        {/* LEFT COLUMN - STICKY */}
         <aside className="flex flex-col gap-8 lg:sticky lg:top-10 lg:w-[400px] xl:w-[460px] shrink-0">
           <div>
             <div
@@ -625,7 +627,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             </p>
           </div>
 
-          {/* AD PLACEMENT SLOT */}
           <div data-reveal className="ps-reveal mt-8 hidden w-full lg:block">
             <div className="flex h-[400px] w-full flex-col items-center justify-center rounded-none border-[3px] border-neutral-900 bg-neutral-100 shadow-[6px_6px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 hover:shadow-[10px_10px_0_rgba(17,17,17,1)]">
               <span className="font-mono text-xs font-bold uppercase tracking-widest text-neutral-400">Ad Space</span>
@@ -634,7 +635,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           </div>
         </aside>
 
-        {/* RIGHT COLUMN - THE TOOL */}
         <div className="flex-1 space-y-14 sm:space-y-20 lg:pt-4">
           
           <section data-reveal className="ps-reveal">

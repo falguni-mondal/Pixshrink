@@ -11,7 +11,6 @@ const prefersReducedMotion = () =>
 
 const useIsoLayoutEffect = typeof window !== "undefined" ? useLayoutEffect : useEffect;
 
-// UPGRADED: Brutalist scrollbar styling
 const DZ_CSS = `
 .dz-scroll{scrollbar-width:thin;scrollbar-color:#111 transparent;overscroll-behavior:contain}
 .dz-scroll::-webkit-scrollbar{width:12px; border-left: 3px solid #111;}
@@ -21,8 +20,8 @@ const DZ_CSS = `
 `;
 
 const SUPPORTED = ["JPG", "PNG", "WEBP", "HEIC"];
+const MAX_MOBILE_FILES = 50;
 
-// UPGRADED: The Image Preview tiles are now harsh, solid-bordered squares
 const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
   const [url, setUrl] = useState("");
   const [failed, setFailed] = useState(false);
@@ -129,7 +128,6 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
         </div>
       )}
 
-      {/* Brutalist Remove Button (Now Mobile Safe!) */}
       <button
         onClick={handleRemove}
         className="absolute -right-3 -top-3 z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-none border-[3px] border-neutral-900 bg-white text-neutral-900 shadow-[2px_2px_0_rgba(17,17,17,1)] transition-all duration-200 hover:bg-[var(--accent)] hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[4px_4px_0_rgba(17,17,17,1)] active:translate-y-0 active:translate-x-0 active:shadow-none focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30 opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/tile:opacity-100"
@@ -148,18 +146,35 @@ const toImages = (list) => Array.from(list).filter(isImageFile);
 
 function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
   const fileInputRef = useRef(null);
+  const [limitError, setLimitError] = useState(false);
+
+  const handleFiles = (newFiles) => {
+    const isMobile = /Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.maxTouchPoints > 1 && window.innerWidth < 1024);
+    
+    // Safety Net: Guard against catastrophic memory overflow on smartphones
+    if (isMobile && files.length + newFiles.length > MAX_MOBILE_FILES) {
+      const allowed = Math.max(0, MAX_MOBILE_FILES - files.length);
+      if (allowed > 0) {
+        onFilesAdded(newFiles.slice(0, allowed));
+      }
+      setLimitError(true);
+      setTimeout(() => setLimitError(false), 6000);
+      return;
+    }
+    onFilesAdded(newFiles);
+  };
 
   const handleFileChange = (e) => {
     if (!e.target.files) return;
     const images = toImages(e.target.files);
-    if (images.length) onFilesAdded(images);
+    if (images.length) handleFiles(images);
   };
 
   const handleDrop = (e) => {
     e.preventDefault();
     if (!e.dataTransfer.files) return;
     const images = toImages(e.dataTransfer.files);
-    if (images.length) onFilesAdded(images);
+    if (images.length) handleFiles(images);
   };
 
   const handleDragOver = (e) => e.preventDefault();
@@ -254,6 +269,24 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
     >
       <style>{DZ_CSS}</style>
 
+      {/* Brutalist Limit Toast */}
+      <div
+        aria-hidden={!limitError}
+        className={`absolute left-4 right-4 top-4 z-50 flex items-start gap-4 rounded-none border-[3px] border-neutral-900 bg-[#FFE600] p-4 shadow-[4px_4px_0_rgba(17,17,17,1)] transition-all duration-300 ${
+          limitError ? "translate-y-0 opacity-100" : "-translate-y-4 opacity-0 pointer-events-none"
+        }`}
+      >
+        <svg className="mt-0.5 h-6 w-6 shrink-0 text-neutral-900" fill="none" viewBox="0 0 24 24" strokeWidth="2.5" stroke="currentColor">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z" />
+        </svg>
+        <div>
+          <h3 className="text-xs font-black uppercase tracking-wide text-neutral-900">Mobile Limit Reached</h3>
+          <p className="mt-1 text-xs font-medium text-neutral-800">
+            To prevent Browser from crashing, mobile batches are capped at {MAX_MOBILE_FILES} images at a time. Desktops are unlimited.
+          </p>
+        </div>
+      </div>
+
       {files.length > 0 ? (
         <div className="flex h-full w-full cursor-default flex-col">
           <div className="z-20 flex shrink-0 items-center justify-between border-b-[3px] border-neutral-900 bg-white px-5 py-4">
@@ -347,11 +380,6 @@ function ImageDropzone({ files, onFilesAdded, onRemoveFile, onClearAll }) {
         </>
       )}
       
-      {/* 
-        CRITICAL MOBILE FIX:
-        Using sr-only prevents iOS/Android from blocking the invisible file input.
-        Removing the onClick here prevents interrupting the mobile OS gallery intent.
-      */}
       <input
         ref={fileInputRef}
         type="file"
