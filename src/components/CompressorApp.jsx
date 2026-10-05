@@ -5,7 +5,7 @@ import gsap from "gsap";
 import CompressionControls from "@/components/CompressionControls";
 import ImageDropzone from "@/components/ImageDropzone";
 import WelcomeModal from "@/components/WelcomeModal";
-import { LoadingOverlay, PixelMosaic, PixelStyles } from "@/components/PixelLoader";
+import { LoadingOverlay, PixelStyles } from "@/components/PixelLoader";
 import { getLenis } from "@/components/SmoothScroll";
 import { compressLocally } from "@/lib/localCompress";
 
@@ -56,9 +56,6 @@ const makeId = () =>
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${(idCounter++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
 
-// ---------------------------------------------------------------------------------------
-// Design helpers (UI only, no effect on compression logic)
-// ---------------------------------------------------------------------------------------
 const prefersReducedMotion = () =>
   typeof window !== "undefined" && window.matchMedia("(prefers-reduced-motion: reduce)").matches;
 
@@ -87,7 +84,6 @@ function Words({ text }) {
   ));
 }
 
-// UPGRADED: Massive pixel-font background numbers for the brutalist editorial feel
 function StepLabel({ n, children }) {
   return (
     <div className="relative mb-6 flex items-center pt-4 sm:mb-8 sm:pt-6">
@@ -365,9 +361,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       f.file.type === "image/heif"
   );
 
-  // -------------------------------------------------------------------------------------
-  // Design + GSAP (everything below only affects how the page looks and moves)
-  // -------------------------------------------------------------------------------------
   const isDisabled = files.length === 0 || isProcessing;
   const resultsReady = showResults && !isProcessing && runInfo.ok > 0;
   const resultsFailed = showResults && !isProcessing && runInfo.ok === 0;
@@ -430,8 +423,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       yTo((e.clientY - (r.top + r.height / 2)) * 0.12);
     };
     
-    // Brutalist buttons don't scale down, they translate into their shadows,
-    // which is handled purely by the :active state in CSS now. We just handle the magnetic float here.
     const leave = () => {
       xTo(0);
       yTo(0);
@@ -569,7 +560,26 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             aria-label="PixShrink, back to top"
             className="inline-flex items-center gap-2.5 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-neutral-900/30 focus-visible:ring-offset-4 focus-visible:ring-offset-white"
           >
-            <PixelMosaic size={28} grid={4} animated={markActive} />
+
+            {/* <PixelMosaic size={28} grid={4} animated={markActive} /> */}
+
+            <svg 
+              className="h-[1.85rem] w-[1.85rem] shrink-0 overflow-visible" 
+              viewBox="0 0 100 100" 
+              xmlns="http://www.w3.org/2000/svg"
+              aria-hidden="true"
+            >
+              {/* Static Background Shadow */}
+              <rect x="25" y="25" width="70" height="70" fill="#111111" />
+              
+              {/* Moving Logo Block */}
+              <g className={`transition-transform duration-200 ease-out ${markActive ? "-translate-y-2.5 translate-x-1.5" : ""}`}>
+                <rect x="5" y="5" width="70" height="70" fill="#ffffff" stroke="#111111" strokeWidth="6" strokeLinejoin="miter" />
+                <rect x="15" y="15" width="22" height="22" fill="#111111" />
+                <rect x="15" y="43" width="22" height="22" fill="var(--accent)" stroke="#111111" strokeWidth="4" strokeLinejoin="miter" />
+                <rect x="43" y="15" width="22" height="22" fill="var(--accent)" stroke="#111111" strokeWidth="4" strokeLinejoin="miter" />
+              </g>
+            </svg>
             <span className="font-[family-name:var(--font-pixel)] text-[1.55rem] font-semibold leading-none tracking-tight text-neutral-900 sm:text-[1.7rem]">
               PixShrink
             </span>
@@ -577,7 +587,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         </div>
       </header>
 
-      {/* UPGRADED: The Bento Box Layout */}
+      {/* The Bento Box Layout */}
       <div className="mx-auto flex w-full max-w-[1760px] flex-col gap-10 px-4 py-8 sm:px-6 sm:py-12 lg:flex-row lg:items-start lg:gap-16 lg:px-10 lg:py-20 2xl:gap-24 2xl:px-14">
         
         {/* LEFT COLUMN - STICKY */}
@@ -610,7 +620,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             </p>
           </div>
 
-          {/* AD PLACEMENT SLOT (Hidden on mobile, stays sticky on desktop) */}
+          {/* AD PLACEMENT SLOT */}
           <div data-reveal className="ps-reveal mt-8 hidden w-full lg:block">
             <div className="flex h-[400px] w-full flex-col items-center justify-center rounded-none border-[3px] border-neutral-900 bg-neutral-100 shadow-[6px_6px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 hover:shadow-[10px_10px_0_rgba(17,17,17,1)]">
               <span className="font-mono text-xs font-bold uppercase tracking-widest text-neutral-400">Ad Space</span>
@@ -655,7 +665,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
           <section data-reveal className="ps-reveal">
             <StepLabel n={2}>Choose your settings</StepLabel>
-            {/* The internal design of CompressionControls will be updated in the next step! */}
             <CompressionControls
               width={width} setWidth={setWidth}
               quality={quality} setQuality={setQuality}
