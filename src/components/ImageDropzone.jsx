@@ -129,10 +129,10 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove }) {
         </div>
       )}
 
-      {/* Brutalist Remove Button */}
+      {/* Brutalist Remove Button (Now Mobile Safe!) */}
       <button
         onClick={handleRemove}
-        className="absolute -right-3 -top-3 z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-none border-[3px] border-neutral-900 bg-white text-neutral-900 shadow-[2px_2px_0_rgba(17,17,17,1)] transition-all duration-200 hover:bg-[var(--accent)] hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[4px_4px_0_rgba(17,17,17,1)] active:translate-y-0 active:translate-x-0 active:shadow-none focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30 opacity-0 group-hover/tile:opacity-100"
+        className="absolute -right-3 -top-3 z-10 flex h-7 w-7 cursor-pointer items-center justify-center rounded-none border-[3px] border-neutral-900 bg-white text-neutral-900 shadow-[2px_2px_0_rgba(17,17,17,1)] transition-all duration-200 hover:bg-[var(--accent)] hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[4px_4px_0_rgba(17,17,17,1)] active:translate-y-0 active:translate-x-0 active:shadow-none focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30 opacity-100 [@media(hover:hover)]:opacity-0 [@media(hover:hover)]:group-hover/tile:opacity-100"
         title="Remove image"
         aria-label={`Remove ${fileObj.file.name}`}
       >
