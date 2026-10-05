@@ -142,11 +142,40 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const savedRef = useRef(null);
   const barRef = useRef(null);
 
-  const handleFilesAdded = useCallback((newFilesArray) => {
-    const filesWithIds = newFilesArray.map((file) => ({
-      id: makeId(),
-      file: file,
-    }));
+  const handleFilesAdded = useCallback(async (newFilesArray) => {
+    const filesWithIds = [];
+
+    // Use a for...of loop instead of Promise.all to prevent freezing the UI
+    for (const file of newFilesArray) {
+      let safeFile = file;
+      const isHeic =
+        file.name.toLowerCase().endsWith(".heic") ||
+        file.name.toLowerCase().endsWith(".heif") ||
+        file.type === "image/heic" ||
+        file.type === "image/heif";
+
+      // EAGER LOADING FIX (SEQUENTIAL):
+      if (isHeic) {
+        try {
+          const buffer = await file.arrayBuffer();
+          safeFile = new Blob([buffer], { type: file.type || "image/heic" });
+          safeFile.name = file.name; 
+          safeFile.lastModified = file.lastModified;
+        } catch (err) {
+          console.warn(`Could not eager-load ${file.name} into RAM:`, err);
+        }
+      }
+
+      filesWithIds.push({
+        id: makeId(),
+        file: safeFile,
+      });
+
+      // Micro-yield: Gives the phone's CPU a tiny break so CSS animations 
+      // (like the dropzone flash) stay perfectly smooth while reading large batches.
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+
     setFiles((prev) => [...prev, ...filesWithIds]);
     setShowResults(false);
   }, []);
