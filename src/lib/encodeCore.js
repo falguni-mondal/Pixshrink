@@ -26,7 +26,7 @@ const MIN_QUALITY = 0.05;
 const AVIF_SPEED = 6; // 0 = slowest/best ... 10 = fastest (T: tune after measuring)
 const AVIF_BEST_CQ = 10; // cqLevel used at slider 100
 const AVIF_MAX_CQ = 63; // cqLevel used at slider 1
-const AVIF_MAX_PASSES = 6; // Max Limit search passes (T)
+const AVIF_MAX_PASSES = 6; // default Max Limit search passes; phones pass a lower cap via opts (T)
 
 // Slider 100 -> cq 10, slider 1 -> cq 63, linear in between (T: tune against WebP sizes).
 const avifCqFromSlider = (q100) =>
@@ -222,15 +222,23 @@ async function decodeForTarget(file, requestedWidth) {
 
 /**
  * @param {File} file
- * @param {{ width: number|string, quality: number, format: string, maxKB?: number }} opts
+ * @param {{ width: number|string, quality: number, format: string, maxKB?: number,
+ *           avifMaxPasses?: number, avifMaxMegapixels?: number }} opts
  *   maxKB: size ceiling. The quality slider becomes the upper bound and we search downward
  *          for the highest quality that fits (ignored for PNG).
+ *   avifMaxPasses: cap on Max Limit search encodes for AVIF (default 6). Phones pass less.
+ *   avifMaxMegapixels: AVIF output larger than this fails instead of risking a tab crash
+ *          (default: no limit). Both come from device.js on the main thread, because a
+ *          worker can't detect the device itself.
  * @returns {Promise<{ blob: Blob, format: string, width: number, height: number, missedTarget: boolean }>}
  *   `format` is always the requested format: it is never substituted. If the browser can't
  *   encode it, this throws. `missedTarget` is true when a maxKB limit was set but even the
  *   lowest quality didn't fit.
  */
-export async function compressImage(file, { width, quality, format, maxKB = 0 }) {
+export async function compressImage(
+  file,
+  { width, quality, format, maxKB = 0, avifMaxPasses, avifMaxMegapixels }
+) {
   if (!(await canEncode(format))) {
     throw new Error(`${format.toUpperCase()} encoding isn't supported by this browser`);
   }
@@ -244,6 +252,16 @@ export async function compressImage(file, { width, quality, format, maxKB = 0 })
     // Never upscale: a 500px image with a 1080px target stays 500px.
     const targetW = Math.min(Number(width) || bitmap.width, bitmap.width);
     const targetH = Math.max(1, Math.round(bitmap.height * (targetW / bitmap.width)));
+
+    // Memory guard for AVIF on phones: the WASM encoder needs the raw pixels plus its own
+    // working memory, so a big output can crash the tab. Fail this file with advice instead.
+    const mpLimit = Number(avifMaxMegapixels) > 0 ? Number(avifMaxMegapixels) : Infinity;
+    const outMP = (targetW * targetH) / 1e6;
+    if (outFormat === "avif" && outMP > mpLimit) {
+      throw new Error(
+        `an AVIF of ${outMP.toFixed(1)} MP is too large for this device (limit ${mpLimit} MP). Lower the width or choose WebP`
+      );
+    }
 
     canvas = makeCanvas(targetW, targetH);
     const ctx = canvas.getContext("2d");
@@ -265,6 +283,7 @@ export async function compressImage(file, { width, quality, format, maxKB = 0 })
 
     let blob;
     let missedTarget = false;
+    const maxPasses = Math.max(1, Math.floor(Number(avifMaxPasses)) || AVIF_MAX_PASSES);
 
     if (outFormat === "avif") {
       // The canvas can't encode AVIF, so hand the raw pixels to the WebAssembly encoder.
@@ -279,14 +298,14 @@ export async function compressImage(file, { width, quality, format, maxKB = 0 })
 
       if (limit && blob.size > limit) {
         // Search for the lowest cqLevel (highest quality) at or above the slider's level
-        // that fits the limit. Capped at AVIF_MAX_PASSES encodes, because AVIF is slow.
+        // that fits the limit. Capped at maxPasses encodes, because AVIF is slow.
         let lo = startCq + 1;
         let hi = AVIF_MAX_CQ;
         let best = null;
         let lastTooBig = null;
         let triedMax = startCq >= AVIF_MAX_CQ;
 
-        for (let pass = 0; pass < AVIF_MAX_PASSES && lo <= hi; pass++) {
+        for (let pass = 0; pass < maxPasses && lo <= hi; pass++) {
           const mid = (lo + hi) >> 1;
           const candidate = await encode(mid);
           if (mid === AVIF_MAX_CQ) triedMax = true;

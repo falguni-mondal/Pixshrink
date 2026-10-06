@@ -1,6 +1,6 @@
 "use client";
 
-import { memo, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import { makeThumbnail } from "@/lib/thumbnail";
 import { isHeicFile } from "@/lib/fileTypes";
@@ -18,11 +18,15 @@ const DZ_CSS = `
 .dz-scroll::-webkit-scrollbar-thumb:hover{background:var(--accent);}
 @keyframes dz-in{from{opacity:0;transform:translateY(12px) scale(.94)}to{opacity:1;transform:none}}
 .dz-in{animation:dz-in .45s cubic-bezier(.22,1,.36,1) backwards;animation-delay:var(--d,0ms)}
-@media (prefers-reduced-motion:reduce){.dz-in{animation:none}}
+@keyframes dz-indet{from{transform:translateX(-100%)}to{transform:translateX(250%)}}
+.dz-indet{animation:dz-indet 1.1s ease-in-out infinite}
+@media (prefers-reduced-motion:reduce){.dz-in{animation:none}.dz-indet{animation:none;width:100%}}
 `;
 
 const SUPPORTED = ["JPG", "PNG", "WEBP", "AVIF", "HEIC"];
 const TOAST_MS = 6000;
+const WAIT_GRACE_MS = 150; // files that arrive this fast need no loader (avoids a flash)
+const WAIT_GIVE_UP_MS = 10000; // safety: never leave the loader up if no "change" ever comes
 
 // Explicit allow-list. Anything else (SVG, animated GIF, PDFs, folders...) is rejected
 // with a message instead of failing later or vanishing silently.
@@ -182,6 +186,57 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
 
   useEffect(() => () => clearTimeout(toastTimerRef.current), []);
 
+  // The gap between closing the system picker and the files arriving. On phones the browser
+  // has to copy every picked photo (Google Photos, HEIC...) before it fires "change", which
+  // can take seconds with nothing on screen. We can't see inside the picker, but we can see
+  // the page lose and regain focus, so: picker opened -> page left -> page back and still no
+  // "change" after a short grace period -> show the loader. "change" or "cancel" hides it.
+  const [waiting, setWaiting] = useState(false);
+  const pickerOpenRef = useRef(false);
+  const leftRef = useRef(false);
+  const armTimerRef = useRef(null);
+  const giveUpTimerRef = useRef(null);
+
+  const clearWait = useCallback(() => {
+    pickerOpenRef.current = false;
+    leftRef.current = false;
+    clearTimeout(armTimerRef.current);
+    clearTimeout(giveUpTimerRef.current);
+    setWaiting(false);
+  }, []);
+
+  useEffect(() => {
+    const onLeave = () => {
+      if (pickerOpenRef.current) leftRef.current = true;
+    };
+    const onReturn = () => {
+      if (!pickerOpenRef.current || !leftRef.current) return;
+      clearTimeout(armTimerRef.current);
+      armTimerRef.current = setTimeout(() => {
+        if (!pickerOpenRef.current) return;
+        setWaiting(true);
+        clearTimeout(giveUpTimerRef.current);
+        giveUpTimerRef.current = setTimeout(clearWait, WAIT_GIVE_UP_MS);
+      }, WAIT_GRACE_MS);
+    };
+    const onVisibility = () => (document.visibilityState === "hidden" ? onLeave() : onReturn());
+
+    const input = fileInputRef.current;
+    window.addEventListener("blur", onLeave);
+    window.addEventListener("focus", onReturn);
+    document.addEventListener("visibilitychange", onVisibility);
+    input?.addEventListener("cancel", clearWait); // picker closed without choosing anything
+
+    return () => {
+      window.removeEventListener("blur", onLeave);
+      window.removeEventListener("focus", onReturn);
+      document.removeEventListener("visibilitychange", onVisibility);
+      input?.removeEventListener("cancel", clearWait);
+      clearTimeout(armTimerRef.current);
+      clearTimeout(giveUpTimerRef.current);
+    };
+  }, [clearWait]);
+
   const showToast = (title, message) => {
     clearTimeout(toastTimerRef.current);
     setToast({ title, message });
@@ -196,11 +251,14 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
   };
 
   const openPicker = () => {
+    pickerOpenRef.current = true; // armed: see the "gap" effect above
+    leftRef.current = false;
     if (fileInputRef.current) fileInputRef.current.value = "";
     fileInputRef.current?.click();
   };
 
   const handleFileChange = (e) => {
+    clearWait(); // the files have arrived
     const picked = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = ""; // lets the same file be picked again later
     if (picked.length) handleFiles(picked);
@@ -299,9 +357,10 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
         </div>
       </div>
 
-      {/* Progress strip: shown only while real background work runs (phone HEIC copies).
-          It never blocks the tiles or buttons, so it can't trap the user. */}
-      {adding && (
+      {/* Progress strip: shown only while real work runs. `waiting` = the phone is still
+          handing over the picked files (the gap after the picker closes); `adding` = phone
+          HEIC copies. It never blocks the tiles or buttons, so it can't trap the user. */}
+      {(adding || waiting) && (
         <div
           role="status"
           aria-live="polite"
@@ -310,16 +369,17 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
           <PixelMosaic size={22} grid={4} />
           <div className="min-w-0 flex-1">
             <p className="text-xs font-black uppercase tracking-widest text-neutral-900">
-              Preparing images{" "}
-              <span className="font-mono">
-                {Math.min(adding.done, adding.total)} / {adding.total}
-              </span>
+              {adding ? "Preparing images" : "Loading your images"}
             </p>
             <div className="mt-2 h-2.5 w-full overflow-hidden border-[2px] border-neutral-900 bg-white">
-              <div
-                className="h-full bg-[var(--accent)] transition-[width] duration-150"
-                style={{ width: `${adding.total ? (adding.done / adding.total) * 100 : 0}%` }}
-              />
+              {adding ? (
+                <div
+                  className="h-full bg-[var(--accent)] transition-[width] duration-150"
+                  style={{ width: `${adding.total ? (adding.done / adding.total) * 100 : 0}%` }}
+                />
+              ) : (
+                <div className="dz-indet h-full w-2/5 bg-[var(--accent)]" />
+              )}
             </div>
           </div>
         </div>

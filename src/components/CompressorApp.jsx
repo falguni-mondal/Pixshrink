@@ -5,14 +5,20 @@ import gsap from "gsap";
 import CompressionControls from "@/components/CompressionControls";
 import ImageDropzone from "@/components/ImageDropzone";
 import WelcomeModal from "@/components/WelcomeModal";
+import FormatWarning, {
+  ConfirmCompressDialog,
+  estimateText,
+} from "@/components/FormatWarning";
 import { LoadingOverlay, PixelStyles } from "@/components/PixelLoader";
 import { getLenis } from "@/components/SmoothScroll";
 import { compressLocally } from "@/lib/localCompress";
 import { matchesFormatSignature } from "@/lib/encodeCore";
 import { isHeicFile } from "@/lib/fileTypes";
 import {
-  MAX_MOBILE_FILES,
+  getAvifMaxMegapixels,
+  getAvifMaxPasses,
   getConcurrency,
+  getMobileAdvice,
   getPartLimit,
   isMobileDevice,
   prefersReducedMotion,
@@ -77,6 +83,50 @@ const makeNameRegistry = () => {
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+const PROBE_TIMEOUT_MS = 4000;
+
+// Reads a single byte to check the browser still has access to the file. On phones the file
+// picker hands out temporary references that can lapse (gallery app backgrounded, screen
+// locked...). Costs no memory: nothing is kept. A slow read is NOT treated as a failure,
+// so a sluggish storage never gets a good file removed by mistake.
+async function isReadable(file) {
+  let timer;
+  try {
+    await Promise.race([
+      file.slice(0, 1).arrayBuffer(),
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, PROBE_TIMEOUT_MS);
+      }),
+    ]);
+    return true;
+  } catch {
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+// "about 6 min left", from the rolling average of recent files.
+const formatEta = (ms) =>
+  ms < 45_000
+    ? "less than a minute left"
+    : `about ${Math.max(1, Math.round(ms / 60_000))} min left`;
+
+// Short names for the batch-limit message (reason codes come from getMobileAdvice).
+const LIMIT_LABEL = {
+  "android-heic-avif": "HEIC to AVIF",
+  "android-avif": "AVIF",
+  "ios-avif": "AVIF",
+  "android-heic": "HEIC photos",
+};
+
+const unreadableMessage = (names) => {
+  const many = names.length !== 1;
+  const shown = names.slice(0, 3).join(", ");
+  const more = names.length > 3 ? ` and ${names.length - 3} more` : "";
+  return `${names.length} image${many ? "s" : ""} could not be read because the browser lost access to ${many ? "them" : "it"}: ${shown}${more}. ${many ? "They were" : "It was"} removed from the queue. Add ${many ? "them" : "it"} again.`;
+};
+
 // Same name + size + modified time means the same file picked twice.
 const fileKey = (f) => `${f.name}|${f.size}|${f.lastModified}`;
 
@@ -92,6 +142,7 @@ const EMPTY_RUN = {
   local: 0,
   kept: 0,
   failed: [],
+  unreadable: [], // names of files the browser lost access to (removed before the run)
   stopped: 0,
   cancelled: false,
   missed: [], // [{ name, size }] still above the Max Limit
@@ -156,6 +207,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const [progress, setProgress] = useState(0);
   const [doneCount, setDoneCount] = useState(0);
   const [totalCount, setTotalCount] = useState(0);
+  const [etaMs, setEtaMs] = useState(0); // estimated time left, 0 until the first file is done
   const [stopping, setStopping] = useState(false);
   const [originalSize, setOriginalSize] = useState(0);
   const [compressedSize, setCompressedSize] = useState(0);
@@ -164,12 +216,17 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const [runInfo, setRunInfo] = useState(EMPTY_RUN);
   const [markActive, setMarkActive] = useState(false);
   const [notice, setNotice] = useState("");
+  const [confirmOpen, setConfirmOpen] = useState(false); // strong-warning confirm dialog (phones)
 
   const [adding, setAdding] = useState(null); // { done, total } while HEIC copies run (phones)
   const addTotalRef = useRef(0);
   const addDoneRef = useRef(0);
 
   const cancelRef = useRef(false);
+  const startingRef = useRef(false); // true only during the quick pre-run readability check
+  // The add-time limit depends on the chosen format, but handleFilesAdded must stay stable.
+  const formatRef = useRef(format);
+  formatRef.current = format;
   const urlsRef = useRef([]);
   // Always holds the latest queue, so async code never works from a stale list.
   const filesRef = useRef([]);
@@ -216,13 +273,18 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const handleFilesAdded = useCallback(
     async (incoming) => {
       const mobile = isMobileDevice();
-      const stats = { dupes: 0, overCap: 0 };
+      const stats = { dupes: 0, overCap: 0, capLimit: Infinity, capReason: null };
 
       // Phase 1 (instant): validate and show every tile right away. No bytes are read yet,
       // and there is no await, so the cap/duplicate checks can't race with another add.
       const current = filesRef.current;
       const seen = new Set(current.map((f) => f.key));
-      let room = mobile ? MAX_MOBILE_FILES - current.length : Infinity;
+      // Phones: the limit depends on what the queue would contain (HEIC on Android, AVIF
+      // output...), so each file is checked against the limit it would bring with it.
+      // A heavy file is refused when it would push the queue over that limit; light files
+      // can still fill the queue up to the normal cap.
+      let count = current.length;
+      let heicInQueue = current.some((f) => isHeicFile(f.file));
       const accepted = [];
       for (const file of incoming) {
         const key = fileKey(file);
@@ -230,12 +292,24 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           stats.dupes++;
           continue;
         }
-        if (room <= 0) {
-          stats.overCap++;
-          continue;
+        if (mobile) {
+          const heic = isHeicFile(file);
+          const advice = getMobileAdvice({
+            format: formatRef.current,
+            hasHeic: heicInQueue || heic,
+          });
+          if (count >= advice.fileLimit) {
+            stats.overCap++;
+            if (advice.fileLimit < stats.capLimit) {
+              stats.capLimit = advice.fileLimit;
+              stats.capReason = advice.reason;
+            }
+            continue;
+          }
+          if (heic) heicInQueue = true;
         }
         seen.add(key);
-        room--;
+        count++;
         accepted.push({ id: makeId(), key, file });
       }
       if (accepted.length) commitFiles((prev) => [...prev, ...accepted]);
@@ -243,8 +317,11 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
       const parts = [];
       if (stats.overCap) {
+        const what = LIMIT_LABEL[stats.capReason];
         parts.push(
-          `${stats.overCap} not added: mobile batches are capped at ${MAX_MOBILE_FILES} images`,
+          what
+            ? `${stats.overCap} not added: with ${what}, this phone handles up to ${stats.capLimit} images per batch`
+            : `${stats.overCap} not added: mobile batches are capped at ${stats.capLimit} images`,
         );
       }
       if (stats.dupes) {
@@ -351,13 +428,41 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   }, []);
 
   const processImages = async () => {
-    if (files.length === 0) return;
-    const queue = files;
+    if (files.length === 0 || startingRef.current) return;
+
+    // Pre-check: drop files the browser can no longer read, so they can't fail deep into
+    // the batch. Everything else carries on, and the app is never blocked.
+    startingRef.current = true;
+    const readable = [];
+    const dead = [];
+    try {
+      for (const item of files) {
+        (await isReadable(item.file) ? readable : dead).push(item);
+      }
+    } finally {
+      startingRef.current = false;
+    }
+
+    const unreadable = dead.map((d) => d.file.name);
+    if (dead.length) {
+      const deadIds = new Set(dead.map((d) => d.id));
+      commitFiles((prev) => prev.filter((f) => !deadIds.has(f.id)));
+    }
+    if (readable.length === 0) {
+      setRunInfo({
+        ...EMPTY_RUN,
+        failed: [{ name: "Unreadable files", reason: unreadableMessage(unreadable) }],
+      });
+      setShowResults(true);
+      return;
+    }
+    const queue = readable;
 
     cancelRef.current = false;
     setStopping(false);
     setStage("compress");
     setDoneCount(0);
+    setEtaMs(0);
     setTotalCount(queue.length);
     setProgress(0);
     setShowResults(false);
@@ -383,6 +488,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       const succeeded = new Set();
       const failed = [];
       let completedCount = 0;
+      const stamps = [Date.now()]; // run start, then one entry per finished file (for the ETA)
       let okOriginalBytes = 0;
       let totalCompressedBytes = 0;
 
@@ -435,6 +541,9 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           quality,
           format,
           maxKB: targetKB,
+          // The worker can't detect the device, so the limits are read here and passed in.
+          avifMaxPasses: getAvifMaxPasses(),
+          avifMaxMegapixels: getAvifMaxMegapixels(),
         });
         return {
           name: `${stripExt(file.name)}_compressed.${usedFormat}`,
@@ -497,6 +606,13 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           setDoneCount(completedCount);
           setProgress((completedCount / queue.length) * 100);
 
+          // Rolling average over the last few files, so one slow file (or the first one,
+          // which also loads the decoder/encoder) doesn't skew the estimate for long.
+          stamps.push(Date.now());
+          const recent = stamps.slice(-6);
+          const avgMs = (recent[recent.length - 1] - recent[0]) / (recent.length - 1);
+          setEtaMs(avgMs * (queue.length - completedCount));
+
           // Short yield so the UI stays responsive. Memory is handled in encodeCore
           // (decode-time downscale + canvas release), not by waiting.
           await sleep(isMobileDevice() ? 50 : 10);
@@ -531,6 +647,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         ok: okCount,
         ...stats,
         failed,
+        unreadable,
         stopped: notAttempted,
         cancelled: wasCancelled,
         missed,
@@ -620,8 +737,34 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
   const hasHeic = files.some((f) => isHeicFile(f.file));
 
+  // Phones only (getMobileAdvice answers "no limit" on desktop). The limit depends on what
+  // is in the queue and the chosen format, so switching format can put the queue over it.
+  // Nothing is dropped: Compress is disabled until the user removes files or changes format.
+  const advice = getMobileAdvice({ format, hasHeic });
+  const overBy = files.length - advice.fileLimit;
+  const overLimit = overBy > 0;
+  const overLimitText = overLimit
+    ? `This phone can process ${advice.fileLimit} images per batch with ${LIMIT_LABEL[advice.reason] || "these settings"}. Remove ${overBy} image${overBy === 1 ? "" : "s"} or switch the format.`
+    : "";
+
   // Also blocked while HEIC copies run on phones, so a half-copied queue can't be processed.
-  const isDisabled = files.length === 0 || isProcessing || Boolean(adding);
+  const isDisabled =
+    files.length === 0 || isProcessing || Boolean(adding) || overLimit;
+
+  // Strongest warning (Android HEIC to AVIF): confirm first. Nothing is blocked, the user
+  // either continues or switches to WebP. Every other case starts straight away.
+  const requestProcess = () => {
+    if (advice.level === "strong") setConfirmOpen(true);
+    else processImages();
+  };
+  const continueAnyway = () => {
+    setConfirmOpen(false);
+    processImages();
+  };
+  const switchToWebp = () => {
+    setConfirmOpen(false);
+    setFormat("webp");
+  };
   const resultsReady = showResults && !isProcessing && runInfo.ok > 0;
   const resultsEmpty = showResults && !isProcessing && runInfo.ok === 0;
   const resultsFailed = resultsEmpty && !runInfo.cancelled;
@@ -826,6 +969,19 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       <style>{PAGE_CSS}</style>
       <WelcomeModal />
 
+      <ConfirmCompressDialog
+        open={confirmOpen}
+        fileCount={files.length}
+        estimate={estimateText({
+          count: files.length,
+          width,
+          hasMaxKB: Number(maxKB) > 0 && format !== "png",
+        })}
+        onContinue={continueAnyway}
+        onSwitch={switchToWebp}
+        onClose={() => setConfirmOpen(false)}
+      />
+
       {isProcessing && (
         <LoadingOverlay
           title={
@@ -834,7 +990,9 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           detail={
             stage === "zip"
               ? "Almost there. Your download starts on its own."
-              : `${doneCount} of ${totalCount} done`
+              : `${doneCount} of ${totalCount} done${
+                  doneCount > 0 && etaMs > 0 ? ` · ${formatEta(etaMs)}` : ""
+                }`
           }
           progress={progress}
           onCancel={
@@ -963,7 +1121,8 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           <section data-reveal className="ps-reveal">
             <StepLabel n={1}>Add your images</StepLabel>
 
-            {hasHeic && (
+            {/* On phones with a warning, FormatWarning (step 3) replaces this box. */}
+            {hasHeic && advice.level === "none" && (
               <div className="mb-6 rounded-none border-[3px] border-neutral-900 bg-[#FFE600] p-5 shadow-[4px_4px_0_rgba(17,17,17,1)] text-left">
                 <div className="flex items-start gap-4">
                   <svg
@@ -1042,13 +1201,19 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           <section data-reveal className="ps-reveal">
             <StepLabel n={3}>Compress and download</StepLabel>
             <div className="flex flex-col items-stretch gap-6">
+              <FormatWarning
+                advice={advice}
+                onSwitch={() => setFormat("webp")}
+                className="w-full md:max-w-2xl"
+              />
+
               <div
                 ref={buttonWrapRef}
                 className="w-full sm:w-auto sm:self-start"
               >
                 <button
                   ref={buttonRef}
-                  onClick={processImages}
+                  onClick={requestProcess}
                   disabled={isDisabled}
                   className={`group relative flex h-14 w-full items-center justify-center gap-3 rounded-none border-[3px] border-neutral-900 px-6 text-sm font-black uppercase tracking-widest transition-colors focus:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30 sm:min-w-[22rem] md:text-base ${
                     isDisabled
@@ -1104,6 +1269,17 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                   )}
                 </button>
               </div>
+
+              {overLimit && (
+                <div
+                  role="alert"
+                  className="w-full rounded-none border-[3px] border-neutral-900 bg-[#FFE600] p-4 text-left shadow-[4px_4px_0_rgba(17,17,17,1)] md:max-w-2xl"
+                >
+                  <p className="text-xs font-bold uppercase tracking-wide text-neutral-900">
+                    {overLimitText}
+                  </p>
+                </div>
+              )}
 
               {resultsReady && (
                 <div
@@ -1236,6 +1412,11 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                     <p className="mt-3 text-xs font-medium text-amber-600">
                       Stopped early. {runInfo.stopped} image
                       {runInfo.stopped === 1 ? "" : "s"} left in the queue.
+                    </p>
+                  )}
+                  {runInfo.unreadable.length > 0 && (
+                    <p className="mt-3 text-xs font-medium text-amber-600">
+                      {unreadableMessage(runInfo.unreadable)}
                     </p>
                   )}
                   {runInfo.failed.length > 0 && (
