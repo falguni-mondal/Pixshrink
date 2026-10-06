@@ -23,8 +23,6 @@ const DZ_CSS = `
 
 const SUPPORTED = ["JPG", "PNG", "WEBP", "AVIF", "HEIC"];
 const TOAST_MS = 6000;
-const PREPARE_DELAY_MS = 300; // wait this long after the picker closes before showing the loader
-const PREPARE_TIMEOUT_MS = 45000; // safety net if neither `change` nor `cancel` ever fires
 
 // Explicit allow-list. Anything else (SVG, animated GIF, PDFs, folders...) is rejected
 // with a message instead of failing later or vanishing silently.
@@ -182,40 +180,7 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
   const toastTimerRef = useRef(null);
   const [toast, setToast] = useState({ title: "", message: "" });
 
-  // "Preparing" = the picker has closed but the OS hasn't handed us the files yet.
-  const [preparing, setPreparing] = useState(false);
-  const pickerOpenRef = useRef(false);
-  const prepTimerRef = useRef(null);
-
-  const stopPreparing = () => {
-    pickerOpenRef.current = false;
-    clearTimeout(prepTimerRef.current);
-    setPreparing(false);
-  };
-
   useEffect(() => () => clearTimeout(toastTimerRef.current), []);
-
-  // After the picker closes, the OS may still be preparing files (iCloud/Photos exports,
-  // HEIC handling) before the `change` event fires. Show a loader for that gap.
-  useEffect(() => {
-    const onBack = () => {
-      if (!pickerOpenRef.current || document.visibilityState === "hidden") return;
-      clearTimeout(prepTimerRef.current);
-      prepTimerRef.current = setTimeout(() => {
-        if (!pickerOpenRef.current) return;
-        setPreparing(true);
-        // Safety net for browsers without the `cancel` event.
-        prepTimerRef.current = setTimeout(stopPreparing, PREPARE_TIMEOUT_MS);
-      }, PREPARE_DELAY_MS);
-    };
-    window.addEventListener("focus", onBack);
-    document.addEventListener("visibilitychange", onBack);
-    return () => {
-      window.removeEventListener("focus", onBack);
-      document.removeEventListener("visibilitychange", onBack);
-      clearTimeout(prepTimerRef.current);
-    };
-  }, []);
 
   const showToast = (title, message) => {
     clearTimeout(toastTimerRef.current);
@@ -232,12 +197,10 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
 
   const openPicker = () => {
     if (fileInputRef.current) fileInputRef.current.value = "";
-    pickerOpenRef.current = true;
     fileInputRef.current?.click();
   };
 
   const handleFileChange = (e) => {
-    stopPreparing();
     const picked = e.target.files ? Array.from(e.target.files) : [];
     e.target.value = ""; // lets the same file be picked again later
     if (picked.length) handleFiles(picked);
@@ -290,7 +253,6 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
   };
 
   const toastVisible = Boolean(toast.message);
-  const showLoader = Boolean(adding) || preparing;
 
   return (
     <div
@@ -337,41 +299,26 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
         </div>
       </div>
 
-      {/* Loader: "getting your images ready" (picker gap) or "preparing images 12 / 50" (RAM copies) */}
-      {showLoader && (
+      {/* Progress strip: shown only while real background work runs (phone HEIC copies).
+          It never blocks the tiles or buttons, so it can't trap the user. */}
+      {adding && (
         <div
           role="status"
           aria-live="polite"
-          className={
-            isEmpty
-              ? "absolute inset-0 z-40 flex flex-col items-center justify-center gap-5 bg-white/95 px-6 text-center"
-              : "absolute inset-x-0 bottom-0 z-40 flex items-center gap-4 border-t-[3px] border-neutral-900 bg-[#FFE600] px-5 py-3"
-          }
+          className="pointer-events-none absolute inset-x-0 bottom-0 z-40 flex items-center gap-4 border-t-[3px] border-neutral-900 bg-[#FFE600] px-5 py-3"
         >
-          <PixelMosaic size={isEmpty ? 44 : 22} grid={4} />
-          <div className={isEmpty ? "w-full max-w-xs" : "min-w-0 flex-1"}>
+          <PixelMosaic size={22} grid={4} />
+          <div className="min-w-0 flex-1">
             <p className="text-xs font-black uppercase tracking-widest text-neutral-900">
-              {adding ? (
-                <>
-                  Preparing images{" "}
-                  <span className="font-mono">
-                    {Math.min(adding.done, adding.total)} / {adding.total}
-                  </span>
-                </>
-              ) : (
-                "Getting your images ready..."
-              )}
+              Preparing images{" "}
+              <span className="font-mono">
+                {Math.min(adding.done, adding.total)} / {adding.total}
+              </span>
             </p>
             <div className="mt-2 h-2.5 w-full overflow-hidden border-[2px] border-neutral-900 bg-white">
               <div
-                className={`h-full bg-[var(--accent)] ${
-                  adding ? "transition-[width] duration-150" : "w-full animate-pulse"
-                }`}
-                style={
-                  adding
-                    ? { width: `${adding.total ? (adding.done / adding.total) * 100 : 0}%` }
-                    : undefined
-                }
+                className="h-full bg-[var(--accent)] transition-[width] duration-150"
+                style={{ width: `${adding.total ? (adding.done / adding.total) * 100 : 0}%` }}
               />
             </div>
           </div>
@@ -476,7 +423,6 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
         multiple
         accept="image/*,.heic,.heif"
         onChange={handleFileChange}
-        onCancel={stopPreparing}
       />
     </div>
   );

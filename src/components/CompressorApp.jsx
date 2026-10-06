@@ -8,6 +8,7 @@ import WelcomeModal from "@/components/WelcomeModal";
 import { LoadingOverlay, PixelStyles } from "@/components/PixelLoader";
 import { getLenis } from "@/components/SmoothScroll";
 import { compressLocally } from "@/lib/localCompress";
+import { matchesFormatSignature } from "@/lib/encodeCore";
 import { isHeicFile } from "@/lib/fileTypes";
 import {
   MAX_MOBILE_FILES,
@@ -17,8 +18,8 @@ import {
   prefersReducedMotion,
 } from "@/lib/device";
 
-const ADD_CHUNK = 8; // files admitted per UI update while adding
 const NOTICE_MS = 6000;
+const MAX_KB_FLOOR = 10; // same floor as encodeCore.js
 
 function formatBytes(bytes, decimals = 2) {
   if (!+bytes) return "0 Bytes";
@@ -37,6 +38,27 @@ const stripExt = (name) => {
 const base64Size = (b64) =>
   Math.floor((b64.length * 3) / 4) -
   (b64.endsWith("==") ? 2 : b64.endsWith("=") ? 1 : 0);
+
+// Checks that data returned by ImageKit really is a file of the format we asked for.
+// Only the first 64 base64 characters (48 bytes) are decoded, which is enough for the signature.
+function verifyCloudOutput(b64, format) {
+  if (typeof b64 !== "string" || b64.length === 0) {
+    throw new Error("ImageKit returned no image data");
+  }
+  let bytes;
+  try {
+    const bin = atob(b64.slice(0, 64));
+    bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  } catch {
+    throw new Error("ImageKit returned data that could not be read");
+  }
+  if (!matchesFormatSignature(bytes, format)) {
+    throw new Error(
+      `ImageKit returned a file that is not a valid ${format.toUpperCase()}`,
+    );
+  }
+}
 
 const makeNameRegistry = () => {
   const used = new Set();
@@ -63,6 +85,19 @@ const makeId = () =>
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
     ? crypto.randomUUID()
     : `${Date.now().toString(36)}-${(idCounter++).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+
+const EMPTY_RUN = {
+  ok: 0,
+  imagekit: 0,
+  local: 0,
+  kept: 0,
+  failed: [],
+  stopped: 0,
+  cancelled: false,
+  missed: [], // [{ name, size }] still above the Max Limit
+  limitKB: 0,
+  formats: {}, // { webp: 12 } output formats actually produced
+};
 
 const PAGE_CSS = `
 .ps-reveal,.ps-word{opacity:0;animation:ps-failsafe 0s linear 3.5s forwards}
@@ -126,15 +161,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const [compressedSize, setCompressedSize] = useState(0);
   const [showResults, setShowResults] = useState(false);
   const [downloads, setDownloads] = useState([]);
-  const [runInfo, setRunInfo] = useState({
-    ok: 0,
-    imagekit: 0,
-    local: 0,
-    kept: 0,
-    failed: [],
-    stopped: 0,
-    cancelled: false,
-  });
+  const [runInfo, setRunInfo] = useState(EMPTY_RUN);
   const [markActive, setMarkActive] = useState(false);
   const [notice, setNotice] = useState("");
 
@@ -345,9 +372,14 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
       const uniqueName = makeNameRegistry();
       const targetKB =
-        Number(maxKB) > 0 && format !== "png" ? Number(maxKB) : 0;
+        Number(maxKB) > 0 && format !== "png"
+          ? Math.max(MAX_KB_FLOOR, Number(maxKB))
+          : 0;
+      const limitBytes = targetKB * 1024;
 
       const stats = { imagekit: 0, local: 0, kept: 0 };
+      const formatCounts = {};
+      const missed = [];
       const succeeded = new Set();
       const failed = [];
       let completedCount = 0;
@@ -383,27 +415,33 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         const data = await res.json();
         if (!data.success) throw new Error(data.error || "Unknown error");
 
+        // Never trust the cloud blindly: it must be the format we asked for.
+        verifyCloudOutput(data.data, format);
+
         return {
           name: data.fileName,
           content: data.data,
           options: { base64: true },
           size: base64Size(data.data),
+          format,
         };
       };
 
-      const viaLocal = async (file, allowFallback) => {
+      const viaLocal = async (file) => {
+        // The requested format is never substituted. If this browser can't encode it,
+        // compressLocally throws and the file stays in the queue.
         const { blob, format: usedFormat } = await compressLocally(file, {
           width,
           quality,
           format,
           maxKB: targetKB,
-          allowFallback,
         });
         return {
           name: `${stripExt(file.name)}_compressed.${usedFormat}`,
           content: blob,
           options: {},
           size: blob.size,
+          format: usedFormat,
         };
       };
 
@@ -413,7 +451,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           let used;
 
           if (activeEngine === "local" || targetKB) {
-            out = await viaLocal(obj.file, false);
+            out = await viaLocal(obj.file);
             used = "local";
           } else if (activeEngine === "auto") {
             try {
@@ -424,7 +462,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                 `ImageKit failed for ${obj.file.name}, using local engine:`,
                 err.message,
               );
-              out = await viaLocal(obj.file, true);
+              out = await viaLocal(obj.file);
               used = "local";
             }
           } else {
@@ -432,17 +470,25 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             used = "imagekit";
           }
 
+          let finalSize;
           if (keepIfLarger && out.size >= obj.file.size) {
             addToZip(obj.file.name, obj.file, {}, obj.file.size);
-            totalCompressedBytes += obj.file.size;
+            finalSize = obj.file.size;
             stats.kept++;
           } else {
             addToZip(out.name, out.content, out.options, out.size);
-            totalCompressedBytes += out.size;
+            finalSize = out.size;
             stats[used]++;
+            formatCounts[out.format] = (formatCounts[out.format] || 0) + 1;
           }
+          totalCompressedBytes += finalSize;
           okOriginalBytes += obj.file.size;
           succeeded.add(obj.id);
+
+          // Report honestly when a Max Limit was set but the file ended up above it.
+          if (limitBytes && finalSize > limitBytes) {
+            missed.push({ name: obj.file.name, size: finalSize });
+          }
         } catch (error) {
           console.error(`Error processing ${obj.file.name}:`, error.message);
           failed.push({ name: obj.file.name, reason: error.message });
@@ -464,6 +510,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           await handleOne(obj);
         }
       };
+      // With a Max Limit every file goes to the local engine, so use the worker pool size.
       const cloudOnly = activeEngine === "imagekit" && !targetKB;
       await Promise.all(
         Array.from(
@@ -486,6 +533,9 @@ export default function CompressorApp({ imagekitAvailable = false }) {
         failed,
         stopped: notAttempted,
         cancelled: wasCancelled,
+        missed,
+        limitKB: targetKB,
+        formats: formatCounts,
       });
 
       if (okCount > 0) {
@@ -528,12 +578,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     } catch (error) {
       console.error("Batch failed:", error);
       setRunInfo({
-        ok: 0,
-        imagekit: 0,
-        local: 0,
-        kept: 0,
-        stopped: 0,
-        cancelled: false,
+        ...EMPTY_RUN,
         failed: [{ name: "Batch", reason: error.message }],
       });
       setShowResults(true);
@@ -560,7 +605,12 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       ? Math.round(((originalSize - compressedSize) / originalSize) * 100)
       : 0;
 
+  const formatSummary = Object.entries(runInfo.formats)
+    .map(([f, n]) => `${n} ${f.toUpperCase()}`)
+    .join(", ");
+
   const breakdown = [
+    formatSummary && `Output: ${formatSummary}`,
     runInfo.imagekit > 0 && `${runInfo.imagekit} via ImageKit`,
     runInfo.local > 0 && `${runInfo.local} in your browser`,
     runInfo.kept > 0 && `${runInfo.kept} kept as original`,
@@ -570,7 +620,8 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
   const hasHeic = files.some((f) => isHeicFile(f.file));
 
-  const isDisabled = files.length === 0 || isProcessing;
+  // Also blocked while HEIC copies run on phones, so a half-copied queue can't be processed.
+  const isDisabled = files.length === 0 || isProcessing || Boolean(adding);
   const resultsReady = showResults && !isProcessing && runInfo.ok > 0;
   const resultsEmpty = showResults && !isProcessing && runInfo.ok === 0;
   const resultsFailed = resultsEmpty && !runInfo.cancelled;
@@ -962,6 +1013,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
             <ImageDropzone
               files={files}
+              adding={adding}
               onFilesAdded={handleFilesAdded}
               onRemoveFile={handleRemoveFile}
               onClearAll={handleClearAll}
@@ -1165,6 +1217,21 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                     </div>
                   )}
 
+                  {runInfo.missed.length > 0 && (
+                    <p className="mt-3 text-xs font-medium text-amber-600">
+                      {runInfo.missed.length} image
+                      {runInfo.missed.length === 1 ? " is" : "s are"} still
+                      above the {runInfo.limitKB} KB limit:{" "}
+                      {runInfo.missed
+                        .slice(0, 3)
+                        .map((m) => `${m.name} (${formatBytes(m.size, 0)})`)
+                        .join(", ")}
+                      {runInfo.missed.length > 3
+                        ? ` and ${runInfo.missed.length - 3} more`
+                        : ""}
+                      . Try a smaller width or a different format.
+                    </p>
+                  )}
                   {runInfo.stopped > 0 && (
                     <p className="mt-3 text-xs font-medium text-amber-600">
                       Stopped early. {runInfo.stopped} image
