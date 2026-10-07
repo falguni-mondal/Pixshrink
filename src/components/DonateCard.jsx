@@ -181,8 +181,7 @@ export default function DonateCard({ className = "" }) {
             <span className="bg-[var(--accent)] px-1 font-black uppercase tracking-wide text-neutral-900">
               100% free
             </span>
-            , with no ads and no uploads. I&apos;m a one-person builder from a
-            lower-middle-class family, and your tips are what let me keep making
+            , with no ads and no uploads. I&apos;m a one-person developer making things easy and accessible, and your tips are what let me keep making
             tools that stay free for everyone.
           </p>
 
