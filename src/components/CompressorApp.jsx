@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import gsap from "gsap";
 import CompressionControls from "@/components/CompressionControls";
+import DonateCard from "@/components/DonateCard";
 import ImageDropzone from "@/components/ImageDropzone";
 import WelcomeModal from "@/components/WelcomeModal";
 import FormatWarning, {
@@ -1105,15 +1106,9 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             </p>
           </div>
 
+          {/* Desktop placement of the donation card (replaces the old Ad Space box). */}
           <div data-reveal className="ps-reveal mt-8 hidden w-full lg:block">
-            <div className="flex h-[400px] w-full flex-col items-center justify-center rounded-none border-[3px] border-neutral-900 bg-neutral-100 shadow-[6px_6px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 hover:shadow-[10px_10px_0_rgba(17,17,17,1)]">
-              <span className="font-mono text-xs font-bold uppercase tracking-widest text-neutral-400">
-                Ad Space
-              </span>
-              <span className="mt-2 max-w-[200px] text-center text-xs text-neutral-400">
-                Reserved for future high-visibility vertical placement
-              </span>
-            </div>
+            <DonateCard />
           </div>
         </aside>
 
@@ -1473,6 +1468,11 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                   </p>
                 </div>
               )}
+
+              {/* Mobile placement of the donation card: the sidebar is hidden on small screens. */}
+              <div className="w-full md:max-w-md lg:hidden">
+                <DonateCard />
+              </div>
             </div>
           </section>
         </div>
