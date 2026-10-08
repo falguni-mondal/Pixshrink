@@ -133,21 +133,35 @@ const DonateCat = forwardRef(function DonateCat(
       el.setAttribute("stroke", INK);
       el.setAttribute("stroke-width", "1.6");
       el.setAttribute("stroke-linejoin", "round");
-      layer.appendChild(el);
 
       const x = EYE_X + (Math.random() - 0.5) * 70;
       const y = 50 + Math.random() * 14;
       const size = 0.8 + Math.random() * 0.6;
-      const tl = gsap.timeline({ onComplete: () => el.remove() });
+
+      // FIX: give the heart its starting position and hide it BEFORE it goes into the DOM.
+      // Before, the heart was appended with no transform and stayed visible at the SVG
+      // origin (top-left) until its delayed timeline step ran, which showed up as a random
+      // heart on the left side.
+      gsap.set(el, {
+        x,
+        y: reduced ? y - 24 : y,
+        scale: reduced ? size : 0.3,
+        opacity: 0,
+        transformOrigin: "50% 50%",
+      });
+      layer.appendChild(el);
+
+      // The stagger is a timeline delay, so the heart waits invisible and in place.
+      const tl = gsap.timeline({
+        delay: reduced ? 0 : i * 0.07,
+        onComplete: () => el.remove(),
+      });
 
       if (reduced) {
         // Cat stays still: the heart just fades in and out in place.
-        tl.set(el, { x, y: y - 24, scale: size, opacity: 0, transformOrigin: "50% 50%" })
-          .to(el, { opacity: 1, duration: 0.3 })
-          .to(el, { opacity: 0, duration: 0.9 });
+        tl.to(el, { opacity: 1, duration: 0.3 }).to(el, { opacity: 0, duration: 0.9 });
       } else {
-        tl.set(el, { x, y, scale: 0.3, opacity: 0, transformOrigin: "50% 50%" }, i * 0.07)
-          .to(el, { opacity: 1, scale: size, duration: 0.2, ease: "back.out(2)" })
+        tl.to(el, { opacity: 1, scale: size, duration: 0.2, ease: "back.out(2)" })
           .to(
             el,
             {

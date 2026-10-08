@@ -242,11 +242,15 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const savedRef = useRef(null);
   const barRef = useRef(null);
 
-  // Can this device share files (the "Save to Files" sheet on phones)?
+  // Can this browser share files through the system share sheet? This works on phones and
+  // on desktop browsers that implement the Web Share API (Chrome/Edge on Windows, Safari on
+  // macOS). Where it isn't supported, the Share button is hidden and the normal download
+  // button is still there.
   const canShareZip = useMemo(() => {
     try {
       return (
-        isMobileDevice() &&
+        typeof navigator !== "undefined" &&
+        typeof navigator.share === "function" &&
         typeof navigator.canShare === "function" &&
         navigator.canShare({
           files: [new File([""], "pixshrink.zip", { type: "application/zip" })],
@@ -682,12 +686,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           // Phones block or confuse several automatic downloads, so only start the first.
           if (i > 0 && isMobileDevice()) break;
           if (i > 0) await sleep(400);
-          const a = document.createElement("a");
-          a.href = ready[i].url;
-          a.download = ready[i].name;
-          document.body.appendChild(a);
-          a.click();
-          document.body.removeChild(a);
+          triggerDownload(ready[i]);
         }
       }
 
@@ -706,15 +705,31 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     }
   };
 
+  const triggerDownload = (d) => {
+    const a = document.createElement("a");
+    a.href = d.url;
+    a.download = d.name;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+  };
+
+  // Opens the system share sheet with the zip. Must run straight from the click handler
+  // (browsers require a user gesture). If sharing isn't possible or fails, download instead.
   const shareZip = async (d) => {
     try {
       const file = new File([d.blob], d.name, { type: "application/zip" });
       if (navigator.canShare?.({ files: [file] })) {
         await navigator.share({ files: [file], title: d.name });
+      } else {
+        // This browser can't share this file: download it instead.
+        triggerDownload(d);
       }
     } catch (err) {
       // AbortError just means the user closed the share sheet.
-      if (err?.name !== "AbortError") console.warn("Share failed:", err);
+      if (err?.name === "AbortError") return;
+      console.warn("Share failed, downloading instead:", err);
+      triggerDownload(d);
     }
   };
 

@@ -59,7 +59,9 @@ const CSS = `
 .cc-num::-webkit-outer-spin-button, .cc-num::-webkit-inner-spin-button {-webkit-appearance:none; margin:0}
 `;
 
-// A rigid, hard-bordered grid instead of a sliding pill
+// A rigid, hard-bordered grid instead of a sliding pill.
+// In fullWidth mode every option gets an equal share of the row (basis-0 + min-w-0), so a
+// longer label can never push the last option out of the box and get clipped.
 function Segmented({ options, value, onChange, label, fullWidth = false }) {
   return (
     <div
@@ -79,8 +81,10 @@ function Segmented({ options, value, onChange, label, fullWidth = false }) {
             disabled={o.disabled}
             title={o.title}
             aria-pressed={active}
-            className={`relative px-4 py-2 text-xs font-black uppercase tracking-widest transition-colors focus:outline-none focus-visible:bg-neutral-200 ${
-              fullWidth ? "flex-1" : ""
+            className={`relative whitespace-nowrap py-2 text-center text-xs font-black uppercase transition-colors focus:outline-none focus-visible:bg-neutral-200 ${
+              fullWidth
+                ? "min-w-0 flex-1 basis-0 px-1 tracking-wide sm:px-2 md:px-1 lg:px-2 xl:px-3 xl:tracking-wider"
+                : "px-4 tracking-widest"
             } ${
               i !== 0 ? "border-l-[3px] border-neutral-900" : ""
             } ${
