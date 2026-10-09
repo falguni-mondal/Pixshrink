@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import gsap from "gsap";
 import CompressionControls from "@/components/CompressionControls";
 import DonateCard from "@/components/DonateCard";
@@ -241,25 +241,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const newSizeRef = useRef(null);
   const savedRef = useRef(null);
   const barRef = useRef(null);
-
-  // Can this browser share files through the system share sheet? This works on phones and
-  // on desktop browsers that implement the Web Share API (Chrome/Edge on Windows, Safari on
-  // macOS). Where it isn't supported, the Share button is hidden and the normal download
-  // button is still there.
-  const canShareZip = useMemo(() => {
-    try {
-      return (
-        typeof navigator !== "undefined" &&
-        typeof navigator.share === "function" &&
-        typeof navigator.canShare === "function" &&
-        navigator.canShare({
-          files: [new File([""], "pixshrink.zip", { type: "application/zip" })],
-        })
-      );
-    } catch {
-      return false;
-    }
-  }, []);
 
   const commitFiles = useCallback((updater) => {
     const next = updater(filesRef.current);
@@ -675,7 +656,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
               : `pixshrink_compressed_part${i + 1}.zip`,
           url: URL.createObjectURL(blob),
           size: blob.size,
-          blob,
         }));
         urlsRef.current = ready.map((d) => d.url);
         setDownloads(ready);
@@ -712,25 +692,6 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-  };
-
-  // Opens the system share sheet with the zip. Must run straight from the click handler
-  // (browsers require a user gesture). If sharing isn't possible or fails, download instead.
-  const shareZip = async (d) => {
-    try {
-      const file = new File([d.blob], d.name, { type: "application/zip" });
-      if (navigator.canShare?.({ files: [file] })) {
-        await navigator.share({ files: [file], title: d.name });
-      } else {
-        // This browser can't share this file: download it instead.
-        triggerDownload(d);
-      }
-    } catch (err) {
-      // AbortError just means the user closed the share sheet.
-      if (err?.name === "AbortError") return;
-      console.warn("Share failed, downloading instead:", err);
-      triggerDownload(d);
-    }
   };
 
   const percentSaved =
@@ -1377,27 +1338,17 @@ export default function CompressorApp({ imagekitAvailable = false }) {
                       </p>
                       <div className="mt-3 flex flex-col gap-3">
                         {downloads.map((d) => (
-                          <div key={d.name} className="flex gap-2">
-                            <a
-                              href={d.url}
-                              download={d.name}
-                              className="flex min-w-0 flex-1 items-center justify-between gap-3 rounded-none border-[3px] border-neutral-900 bg-[var(--accent)] px-4 py-3 text-xs font-black uppercase tracking-wider text-neutral-900 shadow-[3px_3px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[5px_5px_0_rgba(17,17,17,1)] active:translate-x-0 active:translate-y-0 active:shadow-none focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30"
-                            >
-                              <span className="truncate">{d.name}</span>
-                              <span className="shrink-0 font-mono text-[11px]">
-                                {formatBytes(d.size)}
-                              </span>
-                            </a>
-                            {canShareZip && (
-                              <button
-                                type="button"
-                                onClick={() => shareZip(d)}
-                                className="shrink-0 cursor-pointer rounded-none border-[3px] border-neutral-900 bg-white px-4 py-3 text-xs font-black uppercase tracking-wider text-neutral-900 shadow-[3px_3px_0_rgba(17,17,17,1)] transition-transform active:translate-x-0 active:translate-y-0 active:shadow-none focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30"
-                              >
-                                Share
-                              </button>
-                            )}
-                          </div>
+                          <a
+                            key={d.name}
+                            href={d.url}
+                            download={d.name}
+                            className="flex min-w-0 items-center justify-between gap-3 rounded-none border-[3px] border-neutral-900 bg-[var(--accent)] px-4 py-3 text-xs font-black uppercase tracking-wider text-neutral-900 shadow-[3px_3px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-0.5 hover:translate-x-0.5 hover:shadow-[5px_5px_0_rgba(17,17,17,1)] active:translate-x-0 active:translate-y-0 active:shadow-none focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-neutral-900/30"
+                          >
+                            <span className="truncate">{d.name}</span>
+                            <span className="shrink-0 font-mono text-[11px]">
+                              {formatBytes(d.size)}
+                            </span>
+                          </a>
                         ))}
                       </div>
                     </div>
