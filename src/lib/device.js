@@ -21,6 +21,14 @@ const MB = 1024 * 1024;
 const MOBILE_PART_LIMIT = 40 * MB;
 const DESKTOP_PART_LIMIT = 250 * MB;
 
+export const MOBILE_MAX_BATCH_MB = 400; // max total size of one batch on phones
+export const PC_MAX_BATCH_MB = 2000; // max total size of one batch on desktop
+
+/** Total bytes allowed in one batch. Infinity on desktop. */
+export function getMaxBatchBytes() {
+  return isMobileDevice() ? MOBILE_MAX_BATCH_MB * MB : PC_MAX_BATCH_MB * MB;
+}
+
 let mobileCache = null;
 let iosCache = null;
 

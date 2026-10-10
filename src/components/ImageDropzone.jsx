@@ -61,13 +61,15 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove, index = 0 }
   const holderRef = useRef(null);
   const removingRef = useRef(false);
 
-  // Builds the thumbnail only once the tile scrolls into view, and cleans up everything
+  // Builds the thumbnail only once the tile scrolls into view AND the file is secured
+  // (phones copy each picked file to disk first; until then `ready` is false). Broken
+  // files (the browser lost access) never get a thumbnail. Cleans up everything
   // (pending work, observer, object URL, tweens) in one place.
-  // Keyed on the id, not the file: the parent may swap `file` for an in-memory copy later
-  // (phones, HEIC), and that must not restart the thumbnail.
+  // Keyed on the id plus the two flags, not the file: the parent swaps `file` for the
+  // stored copy at the same moment it sets ready, so the effect always sees the stable copy.
   useEffect(() => {
     const el = holderRef.current;
-    if (!el) return;
+    if (!el || !fileObj.ready || fileObj.broken) return; // wait for the stable copy
 
     const controller = new AbortController();
     let objectUrl = "";
@@ -110,7 +112,7 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove, index = 0 }
       gsap.killTweensOf(el);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [fileObj.id]);
+  }, [fileObj.id, fileObj.ready, fileObj.broken]);
 
   const handleRemove = (e) => {
     e.stopPropagation();
@@ -137,7 +139,20 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove, index = 0 }
       style={{ "--d": `${Math.min(index, 24) * 30}ms` }}
       className="dz-in group/tile relative aspect-square rounded-none border-[3px] border-neutral-900 bg-white transform-gpu shadow-[4px_4px_0_rgba(17,17,17,1)] transition-transform hover:-translate-y-1 hover:translate-x-1 hover:shadow-[6px_6px_0_rgba(17,17,17,1)]"
     >
-      {url ? (
+      {/* Broken is checked first: a tile can turn broken after its thumbnail loaded
+          (the pre-run check), and its revoked URL must not be shown. */}
+      {fileObj.broken || failed ? (
+        <div className="flex h-full w-full flex-col items-center justify-center gap-1 bg-red-50 p-2 text-center">
+          <span className="line-clamp-3 break-all font-mono text-[10px] font-bold uppercase text-red-600">
+            {fileObj.file.name}
+          </span>
+          {fileObj.broken && (
+            <span className="font-mono text-[9px] font-bold uppercase text-red-600/70">
+              Remove and re-add
+            </span>
+          )}
+        </div>
+      ) : url ? (
         // eslint-disable-next-line @next/next/no-img-element
         <img
           src={url}
@@ -147,19 +162,13 @@ const ImagePreview = memo(function ImagePreview({ fileObj, onRemove, index = 0 }
           decoding="async"
           className="h-full w-full object-cover"
         />
-      ) : failed ? (
-        <div className="flex h-full w-full items-center justify-center bg-red-50 p-2 text-center">
-          <span className="line-clamp-3 break-all font-mono text-[10px] font-bold uppercase text-red-600">
-            {fileObj.file.name}
-          </span>
-        </div>
       ) : (
         <div className="flex h-full w-full items-center justify-center bg-neutral-100">
           <PixelMosaic size={28} grid={4} />
         </div>
       )}
 
-      {url && (
+      {url && !fileObj.broken && (
         <div className="pointer-events-none absolute inset-x-0 bottom-0 bg-neutral-900 px-2 py-1.5 opacity-0 transition-opacity duration-200 group-hover/tile:opacity-100 border-t-[3px] border-neutral-900">
           <p className="truncate font-mono text-[9px] font-bold uppercase tracking-wider text-white">{fileObj.file.name}</p>
         </div>
@@ -243,7 +252,7 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
     toastTimerRef.current = setTimeout(() => setToast({ title: "", message: "" }), TOAST_MS);
   };
 
-  // The parent enforces the mobile cap and skips duplicates. This only filters by type.
+  // The parent enforces the mobile caps and skips duplicates. This only filters by type.
   const handleFiles = (list) => {
     const { accepted, rejected } = splitFiles(list);
     if (rejected.length) showToast("Files Skipped", rejectionMessage(rejected));
@@ -359,7 +368,8 @@ function ImageDropzone({ files, adding, onFilesAdded, onRemoveFile, onClearAll }
 
       {/* Progress strip: shown only while real work runs. `waiting` = the phone is still
           handing over the picked files (the gap after the picker closes); `adding` = phone
-          HEIC copies. It never blocks the tiles or buttons, so it can't trap the user. */}
+          files being secured to disk. It never blocks the tiles or buttons, so it can't trap
+          the user. */}
       {(adding || waiting) && (
         <div
           role="status"

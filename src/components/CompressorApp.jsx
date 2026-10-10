@@ -15,10 +15,12 @@ import { getLenis } from "@/components/SmoothScroll";
 import { compressLocally } from "@/lib/localCompress";
 import { matchesFormatSignature } from "@/lib/encodeCore";
 import { isHeicFile } from "@/lib/fileTypes";
+import { stash, unstash, clearStash } from "@/lib/fileStore";
 import {
   getAvifMaxMegapixels,
   getAvifMaxPasses,
   getConcurrency,
+  getMaxBatchBytes,
   getMobileAdvice,
   getPartLimit,
   isMobileDevice,
@@ -27,6 +29,7 @@ import {
 
 const NOTICE_MS = 6000;
 const MAX_KB_FLOOR = 10; // same floor as encodeCore.js
+const STASH_CONCURRENCY = 2; // phones: files secured to disk at the same time
 
 function formatBytes(bytes, decimals = 2) {
   if (!+bytes) return "0 Bytes";
@@ -82,14 +85,12 @@ const makeNameRegistry = () => {
   };
 };
 
-const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-
 const PROBE_TIMEOUT_MS = 4000;
 
 // Reads a single byte to check the browser still has access to the file. On phones the file
 // picker hands out temporary references that can lapse (gallery app backgrounded, screen
 // locked...). Costs no memory: nothing is kept. A slow read is NOT treated as a failure,
-// so a sluggish storage never gets a good file removed by mistake.
+// so a sluggish storage never gets a good file flagged by mistake.
 async function isReadable(file) {
   let timer;
   try {
@@ -100,12 +101,15 @@ async function isReadable(file) {
       }),
     ]);
     return true;
-  } catch {
+  } catch (e) {
+    console.warn(`Probe failed for ${file.name}:`, e?.name, e?.message);
     return false;
   } finally {
     clearTimeout(timer);
   }
 }
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // "about 6 min left", from the rolling average of recent files.
 const formatEta = (ms) =>
@@ -125,7 +129,7 @@ const unreadableMessage = (names) => {
   const many = names.length !== 1;
   const shown = names.slice(0, 3).join(", ");
   const more = names.length > 3 ? ` and ${names.length - 3} more` : "";
-  return `${names.length} image${many ? "s" : ""} could not be read because the browser lost access to ${many ? "them" : "it"}: ${shown}${more}. ${many ? "They were" : "It was"} removed from the queue. Add ${many ? "them" : "it"} again.`;
+  return `${names.length} image${many ? "s" : ""} could not be read because the browser lost access to ${many ? "them" : "it"}: ${shown}${more}. Remove the red ${many ? "tiles" : "tile"} and add ${many ? "them" : "it"} again.`;
 };
 
 // Same name + size + modified time means the same file picked twice.
@@ -143,7 +147,7 @@ const EMPTY_RUN = {
   local: 0,
   kept: 0,
   failed: [],
-  unreadable: [], // names of files the browser lost access to (removed before the run)
+  unreadable: [], // names of files the browser lost access to (flagged before the run)
   stopped: 0,
   cancelled: false,
   missed: [], // [{ name, size }] still above the Max Limit
@@ -193,6 +197,9 @@ function StepLabel({ n, children }) {
 }
 
 export default function CompressorApp({ imagekitAvailable = false }) {
+  // Each queue item: { id, key, file, ready, broken }
+  //  ready:  false while a phone is still securing the file (copying it to disk storage)
+  //  broken: true when the browser lost access to the file (shown as a red tile)
   const [files, setFiles] = useState([]);
   const [width, setWidth] = useState(1080);
   const [quality, setQuality] = useState(80);
@@ -219,7 +226,7 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const [notice, setNotice] = useState("");
   const [confirmOpen, setConfirmOpen] = useState(false); // strong-warning confirm dialog (phones)
 
-  const [adding, setAdding] = useState(null); // { done, total } while HEIC copies run (phones)
+  const [adding, setAdding] = useState(null); // { done, total } while phone files are secured
   const addTotalRef = useRef(0);
   const addDoneRef = useRef(0);
 
@@ -256,20 +263,40 @@ export default function CompressorApp({ imagekitAvailable = false }) {
 
   useEffect(() => () => clearTimeout(noticeTimerRef.current), []);
 
+  // The queue lives in memory only, so anything left in the disk stash from a previous or
+  // crashed session is an orphan. (Caveat: a second open tab would lose its stash. Rare.)
+  useEffect(() => {
+    if (isMobileDevice()) clearStash();
+  }, []);
+
   const handleFilesAdded = useCallback(
     async (incoming) => {
       const mobile = isMobileDevice();
-      const stats = { dupes: 0, overCap: 0, capLimit: Infinity, capReason: null };
+      const stats = {
+        dupes: 0,
+        overCap: 0,
+        capLimit: Infinity,
+        capReason: null,
+        overSize: 0,
+      };
 
       // Phase 1 (instant): validate and show every tile right away. No bytes are read yet,
       // and there is no await, so the cap/duplicate checks can't race with another add.
       const current = filesRef.current;
-      const seen = new Set(current.map((f) => f.key));
+      // Broken tiles don't count as duplicates, so a failed file can be added again.
+      const seen = new Set(current.filter((f) => !f.broken).map((f) => f.key));
       // Phones: the limit depends on what the queue would contain (HEIC on Android, AVIF
       // output...), so each file is checked against the limit it would bring with it.
       // A heavy file is refused when it would push the queue over that limit; light files
       // can still fill the queue up to the normal cap.
       let count = current.length;
+      // Phones also have a total-size limit (Infinity on desktop). Broken tiles don't count,
+      // because they can't be processed and the user is asked to remove them anyway.
+      const byteLimit = getMaxBatchBytes();
+      let bytes = current.reduce(
+        (sum, f) => (f.broken ? sum : sum + f.file.size),
+        0,
+      );
       let heicInQueue = current.some((f) => isHeicFile(f.file));
       const accepted = [];
       for (const file of incoming) {
@@ -292,13 +319,34 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             }
             continue;
           }
+          // Total size: a file that would push the batch over the limit is left out,
+          // but a smaller file later in the pick can still fit.
+          if (bytes + file.size > byteLimit) {
+            stats.overSize++;
+            continue;
+          }
           if (heic) heicInQueue = true;
         }
         seen.add(key);
         count++;
-        accepted.push({ id: makeId(), key, file });
+        bytes += file.size;
+        // Phones: not ready until the file is secured (see Phase 2). Desktop: ready at once.
+        accepted.push({
+          id: makeId(),
+          key,
+          file,
+          ready: !mobile,
+          broken: false,
+        });
       }
-      if (accepted.length) commitFiles((prev) => [...prev, ...accepted]);
+      if (accepted.length) {
+        const newKeys = new Set(accepted.map((a) => a.key));
+        commitFiles((prev) => [
+          // A re-added file replaces its old broken tile.
+          ...prev.filter((f) => !(f.broken && newKeys.has(f.key))),
+          ...accepted,
+        ]);
+      }
       setShowResults(false);
 
       const parts = [];
@@ -310,6 +358,11 @@ export default function CompressorApp({ imagekitAvailable = false }) {
             : `${stats.overCap} not added: mobile batches are capped at ${stats.capLimit} images`,
         );
       }
+      if (stats.overSize) {
+        parts.push(
+          `${stats.overSize} not added: a batch can hold up to ${formatBytes(byteLimit, 0)} of images on this phone`,
+        );
+      }
       if (stats.dupes) {
         parts.push(
           `${stats.dupes} duplicate${stats.dupes === 1 ? "" : "s"} skipped`,
@@ -317,52 +370,70 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       }
       if (parts.length) showNotice(`${parts.join(". ")}.`);
 
-      // Phase 2 (background, phones only): copy each HEIC into RAM so it stays readable.
-      // The tile's `file` is swapped when its copy is ready.
-      const heics = mobile ? accepted.filter((a) => isHeicFile(a.file)) : [];
-      if (!heics.length) return;
+      // Phase 2 (phones only): secure every file right away. The picker's File is only a lazy
+      // handle that can expire, so each one is read once and moved into disk-backed storage
+      // (not RAM). The tile's `file` is swapped for a handle onto that copy. Two at a time.
+      if (!mobile || !accepted.length) return;
 
-      addTotalRef.current += heics.length;
+      addTotalRef.current += accepted.length;
       setAdding({ done: addDoneRef.current, total: addTotalRef.current });
 
-      for (const item of heics) {
-        try {
-          const buffer = await item.file.arrayBuffer();
-          const safe = new File([buffer], item.file.name, {
-            type: item.file.type || "image/heic",
-            lastModified: item.file.lastModified,
-          });
-          commitFiles((prev) =>
-            prev.map((f) => (f.id === item.id ? { ...f, file: safe } : f)),
-          );
-        } catch (err) {
-          console.warn(`Could not eager-load ${item.file.name} into RAM:`, err);
-        }
+      let next = 0;
+      const worker = async () => {
+        while (next < accepted.length) {
+          const item = accepted[next++];
+          let patch;
+          try {
+            patch = { file: await stash(item.id, item.file), ready: true };
+          } catch (err) {
+            console.warn(
+              `Could not read ${item.file.name}:`,
+              err?.name,
+              err?.message,
+            );
+            patch = { ready: true, broken: true };
+          }
 
-        addDoneRef.current++;
-        if (addDoneRef.current >= addTotalRef.current) {
-          addDoneRef.current = 0;
-          addTotalRef.current = 0;
-          setAdding(null);
-        } else {
-          setAdding({ done: addDoneRef.current, total: addTotalRef.current });
+          if (filesRef.current.some((f) => f.id === item.id)) {
+            commitFiles((prev) =>
+              prev.map((f) => (f.id === item.id ? { ...f, ...patch } : f)),
+            );
+          } else {
+            unstash(item.id); // the user removed the tile while it was being copied
+          }
+
+          addDoneRef.current++;
+          if (addDoneRef.current >= addTotalRef.current) {
+            addDoneRef.current = 0;
+            addTotalRef.current = 0;
+            setAdding(null);
+          } else {
+            setAdding({ done: addDoneRef.current, total: addTotalRef.current });
+          }
         }
-        await sleep(10);
-      }
+      };
+      await Promise.all(
+        Array.from(
+          { length: Math.min(STASH_CONCURRENCY, accepted.length) },
+          worker,
+        ),
+      );
     },
     [commitFiles, showNotice],
   );
 
   const handleRemoveFile = useCallback(
-    (idToRemove) =>
-      commitFiles((prev) => prev.filter((f) => f.id !== idToRemove)),
+    (idToRemove) => {
+      unstash(idToRemove);
+      commitFiles((prev) => prev.filter((f) => f.id !== idToRemove));
+    },
     [commitFiles],
   );
 
-  const handleClearAll = useCallback(
-    () => commitFiles(() => []),
-    [commitFiles],
-  );
+  const handleClearAll = useCallback(() => {
+    clearStash();
+    commitFiles(() => []);
+  }, [commitFiles]);
 
   useEffect(() => {
     if (!isProcessing) return;
@@ -416,14 +487,19 @@ export default function CompressorApp({ imagekitAvailable = false }) {
   const processImages = async () => {
     if (files.length === 0 || startingRef.current) return;
 
-    // Pre-check: drop files the browser can no longer read, so they can't fail deep into
-    // the batch. Everything else carries on, and the app is never blocked.
+    // Pre-check: files already flagged broken, or that the browser can no longer read, are
+    // set aside so they can't fail deep into the batch. They stay visible as red tiles
+    // (never silently deleted), and everything else carries on.
     startingRef.current = true;
     const readable = [];
     const dead = [];
     try {
       for (const item of files) {
-        (await isReadable(item.file) ? readable : dead).push(item);
+        if (item.broken) {
+          dead.push(item);
+          continue;
+        }
+        ((await isReadable(item.file)) ? readable : dead).push(item);
       }
     } finally {
       startingRef.current = false;
@@ -432,12 +508,16 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     const unreadable = dead.map((d) => d.file.name);
     if (dead.length) {
       const deadIds = new Set(dead.map((d) => d.id));
-      commitFiles((prev) => prev.filter((f) => !deadIds.has(f.id)));
+      commitFiles((prev) =>
+        prev.map((f) => (deadIds.has(f.id) ? { ...f, broken: true } : f)),
+      );
     }
     if (readable.length === 0) {
       setRunInfo({
         ...EMPTY_RUN,
-        failed: [{ name: "Unreadable files", reason: unreadableMessage(unreadable) }],
+        failed: [
+          { name: "Unreadable files", reason: unreadableMessage(unreadable) },
+        ],
       });
       setShowResults(true);
       return;
@@ -596,7 +676,8 @@ export default function CompressorApp({ imagekitAvailable = false }) {
           // which also loads the decoder/encoder) doesn't skew the estimate for long.
           stamps.push(Date.now());
           const recent = stamps.slice(-6);
-          const avgMs = (recent[recent.length - 1] - recent[0]) / (recent.length - 1);
+          const avgMs =
+            (recent[recent.length - 1] - recent[0]) / (recent.length - 1);
           setEtaMs(avgMs * (queue.length - completedCount));
 
           // Short yield so the UI stays responsive. Memory is handled in encodeCore
@@ -671,6 +752,8 @@ export default function CompressorApp({ imagekitAvailable = false }) {
       }
 
       setShowResults(true);
+      // Finished files leave the queue, so free their disk copies too.
+      succeeded.forEach((id) => unstash(id));
       commitFiles((prev) => prev.filter((f) => !succeeded.has(f.id)));
     } catch (error) {
       console.error("Batch failed:", error);
@@ -724,9 +807,14 @@ export default function CompressorApp({ imagekitAvailable = false }) {
     ? `This phone can process ${advice.fileLimit} images per batch with ${LIMIT_LABEL[advice.reason] || "these settings"}. Remove ${overBy} image${overBy === 1 ? "" : "s"} or switch the format.`
     : "";
 
-  // Also blocked while HEIC copies run on phones, so a half-copied queue can't be processed.
+  // Also blocked while phone files are being secured (so a half-copied queue can't be
+  // processed), and when every file in the queue is broken (nothing could be compressed).
   const isDisabled =
-    files.length === 0 || isProcessing || Boolean(adding) || overLimit;
+    files.length === 0 ||
+    files.every((f) => f.broken) ||
+    isProcessing ||
+    Boolean(adding) ||
+    overLimit;
 
   // Strongest warning (Android HEIC to AVIF): confirm first. Nothing is blocked, the user
   // either continues or switches to WebP. Every other case starts straight away.
